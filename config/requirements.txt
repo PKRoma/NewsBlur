@@ -69,6 +69,7 @@ oauthlib>=3.2.0
 openai~=1.56.1
 anthropic>=0.40.0
 google-genai>=1.0.0
+lightningcss
 paypalrestsdk>=1.13.3
 pbr>=6.0.0
 Pillow>=10.0.0
