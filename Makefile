@@ -386,6 +386,8 @@ build_deploy: buildx_setup
 build: build_web build_node build_monitor build_deploy
 push_web: buildx_setup
 	docker buildx build . --push --platform linux/amd64,linux/arm64 --file=docker/newsblur_base_image.Dockerfile --tag=newsblur/newsblur_python3
+push_web_py313: buildx_setup
+	docker buildx build . --push --platform linux/amd64,linux/arm64 --file=docker/newsblur_base_image.Dockerfile --tag=newsblur/newsblur_python3:py313
 push_node: buildx_setup
 	docker buildx build . --push --platform linux/amd64,linux/arm64 --file=docker/node/Dockerfile --tag=newsblur/newsblur_node
 push_monitor: buildx_setup
