@@ -75,6 +75,10 @@ pre, blockquote {
     text-wrap: pretty;
 }
 
+pre {
+    white-space: pre-wrap !important;
+}
+
 figure.wp-block-embed,
 .wp-block-embed__wrapper,
 .embed-responsive {
