@@ -1115,7 +1115,7 @@ color: #a85b40;
 .NB-dark .NB-splash-info .NB-splash-links a,
 .NB-dark .NB-static a,
 .NB-dark .NB-splash-link {
-    color: #83B4E0;
+    color: #FBDB9B;
 }
 
 /* "replied to your reply" text color */
@@ -3626,6 +3626,15 @@ a.mention, a.mention-group {
 /* Date filter upgrade notice dark mode */
 .NB-dark .NB-date-filter-upgrade-notice {
     color: #909090;
+}
+
+/* Story Clustering dark mode */
+.NB-dark .NB-filter-popover .NB-clustering-read-label {
+    color: #909090;
+}
+
+.NB-dark .NB-staff-only-badge {
+    background: #c03800;
 }
 
 /* ============================== */
