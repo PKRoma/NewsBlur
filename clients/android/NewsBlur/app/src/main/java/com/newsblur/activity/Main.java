@@ -15,7 +15,6 @@ import android.view.animation.AccelerateInterpolator;
 import android.view.animation.DecelerateInterpolator;
 import android.widget.AbsListView;
 
-import androidx.activity.OnBackPressedCallback;
 import androidx.annotation.NonNull;
 import androidx.annotation.StringRes;
 import androidx.fragment.app.FragmentManager;
@@ -83,21 +82,6 @@ public class Main extends NbActivity implements StateChangedListener, SwipeRefre
         hideSyncStatusIndicator(true);
     };
 
-    private final OnBackPressedCallback searchBackCallback =
-            new OnBackPressedCallback(false) {
-                @Override
-                public void handleOnBackPressed() {
-                    if (binding.inputSearchQuery.getVisibility() == View.VISIBLE) {
-                        binding.inputSearchQuery.setVisibility(View.GONE);
-                        binding.inputSearchQuery.setText("");
-                        checkSearchQuery();
-
-                        // allow system to own back again
-                        setEnabled(false);
-                    }
-                }
-            };
-
     @Override
     public void onCreate(Bundle savedInstanceState) {
         Trace.beginSection("MainOnCreate");
@@ -147,7 +131,6 @@ public class Main extends NbActivity implements StateChangedListener, SwipeRefre
             openAllStories(isAllStoriesSearch);
         }
 
-        getOnBackPressedDispatcher().addCallback(this, searchBackCallback);
         Trace.endSection();
         reportFullyDrawn();
     }

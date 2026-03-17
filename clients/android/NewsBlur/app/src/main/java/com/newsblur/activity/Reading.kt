@@ -117,7 +117,6 @@ abstract class Reading :
     // mark story as read behavior
     private var markStoryReadJob: Job? = null
     private lateinit var markStoryReadBehavior: MarkStoryReadBehavior
-    private val readTimeTracker = ReadTimeTracker()
     private var readTimeTickJob: Job? = null
 
     // unread count for the circular progress overlay. set to nonzero to activate the progress indicator overlay

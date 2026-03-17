@@ -244,7 +244,6 @@ public abstract class ItemsList extends NbActivity implements ReadingActionListe
                 }
                 return false;
             }
-            return false;
         });
         setupStoryHeader();
         refreshStoryHeaderControls();

@@ -142,8 +142,8 @@ object NetworkModule {
 
     @Singleton
     @Provides
-    fun provideReadTimeTracker(networkClient: NetworkClient): ReadTimeTracker =
-        ReadTimeTracker(networkClient)
+    fun provideReadTimeTracker(): ReadTimeTracker =
+        ReadTimeTracker()
 
     @Singleton
     @Provides
