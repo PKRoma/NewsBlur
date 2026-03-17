@@ -1,3 +1,9 @@
+"""Django Pipeline asset utilities: glob expansion and custom storage.
+
+Extends django-pipeline with glob pattern expansion for DEBUG_ASSETS mode,
+custom finders, and GZip-enabled manifest storage.
+"""
+
 import glob as python_glob
 
 # Debug glob expansion - enables glob expansion in DEBUG_ASSETS mode
@@ -59,6 +65,7 @@ class LightningCSSCompressor(CompressorBase):
             filename="pipeline.css",
             error_recovery=True,
             minify=True,
+            browsers_list=["> 0.5%"],
         )
 
 

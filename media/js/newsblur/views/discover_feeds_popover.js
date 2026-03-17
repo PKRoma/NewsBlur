@@ -16,7 +16,8 @@ NEWSBLUR.DiscoverFeedsPopover = NEWSBLUR.ReaderPopover.extend({
     },
 
     events: {
-
+        "click .NB-discover-archive-banner": "open_premium_modal",
+        "click .NB-discover-index-button": "trigger_discover_indexing"
     },
 
     initialize: function (options) {
@@ -35,6 +36,13 @@ NEWSBLUR.DiscoverFeedsPopover = NEWSBLUR.ReaderPopover.extend({
         this.page = 1;
         this.has_more_results = true;
         this.is_loading = false;
+        this.is_discover_indexing = false;
+
+        // Detect if discover indexing is already in progress (opened popover mid-indexing)
+        var $related_stories_buttons = $('.NB-sideoption.NB-feed-story-discover');
+        if ($related_stories_buttons.data('tipsy')) {
+            this.is_discover_indexing = true;
+        }
 
         this.shown_feed_titles = new Set();
 
@@ -93,6 +101,7 @@ NEWSBLUR.DiscoverFeedsPopover = NEWSBLUR.ReaderPopover.extend({
                     $.make('div', { className: 'NB-icon' }),
                     'Discover sites'
                 ]),
+                this.make_archive_upgrade_banner(),
                 $.make('div', { className: 'NB-discover-loading' }, [
                     $.make('div', { className: 'NB-loading NB-active' })
                 ])
@@ -118,6 +127,7 @@ NEWSBLUR.DiscoverFeedsPopover = NEWSBLUR.ReaderPopover.extend({
                     $.make('div', { className: 'NB-icon' }),
                     'Discover sites'
                 ]),
+                this.make_archive_upgrade_banner(),
                 $.make('div', { className: 'NB-discover-feed-badges NB-story-pane-west' }, _.flatten(this.discover_feeds_model.map(function (discover_feed) {
                     var $story_titles = $.make('div', { className: 'NB-story-titles' });
                     var story_titles_view = new NEWSBLUR.Views.StoryTitlesView({
@@ -134,6 +144,7 @@ NEWSBLUR.DiscoverFeedsPopover = NEWSBLUR.ReaderPopover.extend({
                             show_folders: true,
                             selected_folder_title: self.options.selected_folder_title,
                             in_popover: self,
+                            in_add_site_view: self,
                             load_feed_after_add: false
                         }),
                         story_titles_view.render().el
@@ -234,6 +245,7 @@ NEWSBLUR.DiscoverFeedsPopover = NEWSBLUR.ReaderPopover.extend({
                     show_folders: true,
                     selected_folder_title: self.options.selected_folder_title,
                     in_popover: self,
+                    in_add_site_view: self,
                     load_feed_after_add: false
                 }),
                 story_titles_view.render().el
@@ -273,6 +285,211 @@ NEWSBLUR.DiscoverFeedsPopover = NEWSBLUR.ReaderPopover.extend({
     // = Events =
     // ==========
 
+    make_freshness_indicator: function (last_story_date, options) {
+        options = options || {};
+        var freshness_class = 'NB-add-site-card-freshness';
+        var freshness_label;
 
+        if (!last_story_date) {
+            if (!options.show_empty) return null;
+            freshness_class += ' NB-freshness-none';
+            freshness_label = 'No stories yet';
+            return $.make('div', { className: freshness_class }, [
+                $.make('span', { className: 'NB-freshness-dot' }),
+                $.make('span', { className: 'NB-freshness-label' }, freshness_label)
+            ]);
+        }
+
+        var last_date = new Date(last_story_date);
+        if (isNaN(last_date.getTime())) return null;
+
+        var now = new Date();
+        var days_ago = Math.floor((now - last_date) / (1000 * 60 * 60 * 24));
+
+        if (days_ago < 365) {
+            freshness_class += ' NB-freshness-active';
+            if (days_ago < 1) {
+                freshness_label = 'Updated today';
+            } else if (days_ago < 7) {
+                freshness_label = 'Updated ' + days_ago + (days_ago === 1 ? ' day ago' : ' days ago');
+            } else if (days_ago < 30) {
+                var weeks = Math.floor(days_ago / 7);
+                freshness_label = 'Updated ' + weeks + (weeks === 1 ? ' week ago' : ' weeks ago');
+            } else {
+                var months = Math.floor(days_ago / 30);
+                freshness_label = 'Updated ' + (months === 1 ? '1 month ago' : months + ' months ago');
+            }
+        } else {
+            freshness_class += ' NB-freshness-stale';
+            var date_str = last_date.toLocaleDateString(undefined, {
+                month: 'short', day: 'numeric', year: 'numeric'
+            });
+            freshness_label = 'Stale \u2014 last story ' + date_str;
+        }
+
+        return $.make('div', { className: freshness_class }, [
+            $.make('span', { className: 'NB-freshness-dot' }),
+            $.make('span', { className: 'NB-freshness-label' }, freshness_label)
+        ]);
+    },
+
+    open_premium_modal: function (e) {
+        e.preventDefault();
+        e.stopPropagation();
+        this.close(_.bind(function () {
+            NEWSBLUR.reader.open_premium_upgrade_modal();
+        }, this));
+    },
+
+    trigger_discover_indexing: function (e) {
+        e.preventDefault();
+        e.stopPropagation();
+
+        if (this.is_discover_indexing) return;
+
+        this.is_discover_indexing = true;
+        this.update_index_button_state();
+
+        $.ajax({
+            url: '/discover/index/',
+            type: 'POST',
+            success: _.bind(function (data) {
+                if (data.code < 0) {
+                    this.is_discover_indexing = false;
+                    this.update_index_button_state();
+                }
+            }, this),
+            error: _.bind(function () {
+                this.is_discover_indexing = false;
+                this.update_index_button_state();
+            }, this)
+        });
+    },
+
+    update_index_button_state: function () {
+        var $button = this.$('.NB-discover-index-button');
+        if (this.is_discover_indexing) {
+            $button.addClass('NB-disabled').text('Indexing...');
+        } else {
+            $button.removeClass('NB-disabled').text('Index remaining feeds');
+        }
+    },
+
+    update_discover_progress: function (message) {
+        if (message == "start") {
+            this.is_discover_indexing = true;
+            this.update_index_button_state();
+        } else if (message == "done") {
+            this.is_discover_indexing = false;
+            // Refresh the entire popover to get new recommendations
+            this.page = 1;
+            this.has_more_results = true;
+            this.shown_feed_titles.clear();
+            this.discover_feeds_model.reset();
+            this.fetch_data();
+        } else if (_.string.startsWith(message, 'feeds:')) {
+            // Update progress bar with current indexed count
+            var counts = this.get_discover_counts();
+            var progress_pct = counts.feed_count > 0 ? Math.round((counts.discover_indexed_count / counts.feed_count) * 100) : 0;
+
+            this.$('.NB-discover-archive-banner-progress-fill').css('width', progress_pct + '%');
+            this.$('.NB-discover-archive-banner-progress-label').text(
+                counts.discover_indexed_count + ' of ' + counts.feed_count + ' sites indexed'
+            );
+            this.$('.NB-discover-archive-banner-body').text(
+                counts.discover_indexed_count + ' of ' + counts.feed_count +
+                ' sites indexed. Index remaining feeds to get better recommendations.'
+            );
+        }
+    },
+
+    get_discover_counts: function () {
+        var feed_count, discover_indexed_count;
+        if (this.options.feed_ids) {
+            var feed_ids = this.options.feed_ids;
+            feed_count = feed_ids.length;
+            discover_indexed_count = NEWSBLUR.assets.feeds.filter(function (feed) {
+                return _.contains(feed_ids, feed.get('id'));
+            }).reduce(function (sum, feed) {
+                return sum + (feed.get('discover_indexed') ? 1 : 0);
+            }, 0);
+        } else {
+            feed_count = NEWSBLUR.assets.feeds.length;
+            discover_indexed_count = NEWSBLUR.assets.feeds.discover_indexed();
+        }
+        return { feed_count: feed_count, discover_indexed_count: discover_indexed_count };
+    },
+
+    make_archive_upgrade_banner: function () {
+        var counts = this.get_discover_counts();
+        var feed_count = counts.feed_count;
+        var discover_indexed_count = counts.discover_indexed_count;
+        var progress_pct = feed_count > 0 ? Math.round((discover_indexed_count / feed_count) * 100) : 0;
+
+        // Archive users: show index banner if not fully indexed
+        if (NEWSBLUR.Globals.is_archive) {
+            if (progress_pct >= 100) return false;
+
+            var is_indexing = this.is_discover_indexing;
+            var button_text = is_indexing ? 'Indexing...' : 'Index remaining feeds';
+            var button_class = 'NB-discover-index-button' + (is_indexing ? ' NB-disabled' : '');
+
+            return $.make('div', { className: 'NB-discover-index-banner' }, [
+                $.make('div', { className: 'NB-discover-index-banner-content' }, [
+                    $.make('div', { className: 'NB-discover-archive-banner-icon' }),
+                    $.make('div', { className: 'NB-discover-archive-banner-text' }, [
+                        $.make('div', { className: 'NB-discover-archive-banner-title' },
+                            'Index feeds for discovery'
+                        ),
+                        $.make('div', { className: 'NB-discover-archive-banner-body' },
+                            discover_indexed_count + ' of ' + feed_count +
+                            ' sites indexed. Index remaining feeds to get better recommendations.'
+                        )
+                    ])
+                ]),
+                $.make('div', { className: 'NB-discover-archive-banner-progress' }, [
+                    $.make('div', { className: 'NB-discover-archive-banner-progress-bar' }, [
+                        $.make('div', {
+                            className: 'NB-discover-archive-banner-progress-fill',
+                            style: 'width: ' + progress_pct + '%'
+                        })
+                    ]),
+                    $.make('div', { className: 'NB-discover-archive-banner-progress-label' },
+                        discover_indexed_count + ' of ' + feed_count + ' sites indexed'
+                    )
+                ]),
+                $.make('div', { className: button_class }, button_text)
+            ]);
+        }
+
+        // Non-archive users: upgrade banner
+        return $.make('div', { className: 'NB-discover-archive-banner' }, [
+            $.make('div', { className: 'NB-discover-archive-banner-content' }, [
+                $.make('div', { className: 'NB-discover-archive-banner-icon' }),
+                $.make('div', { className: 'NB-discover-archive-banner-text' }, [
+                    $.make('div', { className: 'NB-discover-archive-banner-title' }, [
+                        'Unlock full discovery',
+                        $.make('span', { className: 'NB-archive-badge' }, 'Premium Archive')
+                    ]),
+                    $.make('div', { className: 'NB-discover-archive-banner-body' },
+                        'Only ' + discover_indexed_count + ' of your ' + feed_count +
+                        ' sites are indexed for discovery. Upgrade to index all your sites and get personalized recommendations.'
+                    )
+                ])
+            ]),
+            $.make('div', { className: 'NB-discover-archive-banner-progress' }, [
+                $.make('div', { className: 'NB-discover-archive-banner-progress-bar' }, [
+                    $.make('div', {
+                        className: 'NB-discover-archive-banner-progress-fill',
+                        style: 'width: ' + progress_pct + '%'
+                    })
+                ]),
+                $.make('div', { className: 'NB-discover-archive-banner-progress-label' },
+                    discover_indexed_count + ' of ' + feed_count + ' sites indexed'
+                )
+            ]),
+            $.make('div', { className: 'NB-discover-archive-banner-cta' }, 'Upgrade to Premium Archive')
+        ]);
+    }
 
 });

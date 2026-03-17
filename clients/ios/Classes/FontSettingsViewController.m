@@ -427,8 +427,8 @@
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     NSInteger adjustedRow = [self adjustedRow:indexPath.row];
-    if (adjustedRow != 6) {
-        [self dismissViewControllerAnimated:adjustedRow != 3 && adjustedRow != 4 && adjustedRow != 5 completion:nil];
+    if (adjustedRow != 6 && adjustedRow != 3) {
+        [self dismissViewControllerAnimated:adjustedRow != 4 && adjustedRow != 5 completion:nil];
     }
 
     if (adjustedRow == 0) {
@@ -639,7 +639,7 @@
     [[ThemeManager themeManager] updateSegmentedControl:self.themeSegment];
 
     // Show white pill for all selections (Auto and color themes)
-    self.themeSegment.selectedSegmentTintColor = UIColorFromLightDarkRGB(0xffffff, 0x6f6f75);
+    self.themeSegment.selectedSegmentTintColor = UIColorFromLightSepiaMediumDarkRGB(0xdce6f0, 0xFAF5ED, 0xbbbbbb, 0x888890);
 
     [cell.contentView addSubview:self.themeSegment];
 

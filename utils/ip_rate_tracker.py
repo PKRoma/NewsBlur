@@ -1,9 +1,10 @@
 """
 IP-based rate tracking for identifying automated/abusive request patterns.
 
-Two tracking systems:
+Three tracking systems:
 1. Reader rate tracking - counts requests to /reader/* endpoints
 2. Fail2ban-style tracking - counts 404s and suspicious paths per IP
+3. Attack payload detection - detects and auto-bans IPs sending malicious payloads
 
 See apps/profile/middleware.py for middleware integration.
 """
@@ -11,24 +12,17 @@ import datetime
 import json
 import re
 import time
+from urllib.parse import unquote_plus
 
 import redis
 from django.conf import settings
-from prometheus_client import Counter, Gauge
+from prometheus_client import Counter
 
 # Prometheus metrics - low cardinality (safe for high-volume scraping)
 READER_REQUESTS = Counter(
     "newsblur_reader_requests_total",
     "Total reader endpoint requests",
     ["endpoint", "user_agent"],
-)
-ABUSERS_CURRENT = Gauge(
-    "newsblur_rate_limit_abusers_current",
-    "Current number of IPs exceeding threshold in this window",
-)
-TOP_ABUSER_REQUESTS = Gauge(
-    "newsblur_rate_limit_top_abuser_requests",
-    "Request count from highest-volume IP in current window",
 )
 ABUSE_REQUESTS_TOTAL = Counter(
     "newsblur_rate_limit_abuse_requests_total",
@@ -39,10 +33,6 @@ ABUSE_REQUESTS_TOTAL = Counter(
 WOULD_BE_DENIED_TOTAL = Counter(
     "newsblur_rate_limit_would_deny_total",
     "Total requests that would be denied if rate limiting was enabled",
-)
-WOULD_BE_DENIED_IPS = Gauge(
-    "newsblur_rate_limit_would_deny_ips_current",
-    "Current number of unique IPs that would be denied",
 )
 
 
@@ -61,7 +51,6 @@ class IPRateTracker:
     TTL_SECONDS = 3600  # 1 hour
     META_TTL_SECONDS = 7200  # 2 hours
     ABUSE_THRESHOLD = 300  # requests per 5-min window
-    MAX_ABUSER_METRICS = 20  # limit Redis zrevrange scan to top N IPs
 
     # User agent classification patterns
     UA_PATTERNS = {
@@ -73,9 +62,6 @@ class IPRateTracker:
 
     def __init__(self):
         self._redis = None
-        self._last_gauge_update = 0
-        self._last_denial_gauge_update = 0
-        self._gauge_update_interval = 30  # seconds
 
     @property
     def redis(self):
@@ -191,50 +177,6 @@ class IPRateTracker:
         if current_count > self.ABUSE_THRESHOLD:
             ABUSE_REQUESTS_TOTAL.inc()
 
-        # Periodically update Prometheus gauges
-        self._maybe_update_gauges(window)
-
-    def _maybe_update_gauges(self, window):
-        """
-        Update Prometheus gauges periodically (not on every request).
-        """
-        now = time.time()
-        if now - self._last_gauge_update < self._gauge_update_interval:
-            return
-
-        self._last_gauge_update = now
-        self._update_gauges(window)
-
-    def _update_gauges(self, window):
-        """
-        Update Prometheus gauge metrics from Redis.
-        """
-        top_key = f"ipr:top:{window}"
-
-        # Get top offenders
-        top_ips = self.redis.zrevrange(top_key, 0, self.MAX_ABUSER_METRICS - 1, withscores=True)
-
-        if not top_ips:
-            ABUSERS_CURRENT.set(0)
-            TOP_ABUSER_REQUESTS.set(0)
-            return
-
-        # Count IPs over threshold
-        abuser_count = 0
-        top_count = 0
-
-        for ip_bytes, count in top_ips:
-            count = int(count)
-
-            if count > top_count:
-                top_count = count
-
-            if count > self.ABUSE_THRESHOLD:
-                abuser_count += 1
-
-        ABUSERS_CURRENT.set(abuser_count)
-        TOP_ABUSER_REQUESTS.set(top_count)
-
     def get_ip_metadata(self, ip):
         """
         Get metadata hash for an IP address.
@@ -313,14 +255,6 @@ class IPRateTracker:
         threshold = getattr(settings, "IP_RATE_LIMIT_THRESHOLD", self.ABUSE_THRESHOLD)
         return int(count) > threshold
 
-    def force_update_gauges(self):
-        """
-        Force immediate update of Prometheus gauges.
-        Useful for testing or manual refresh.
-        """
-        window = self.get_current_window()
-        self._update_gauges(window)
-
     def track_would_be_denied(self, request, endpoint):
         """
         Record that a request WOULD have been denied if rate limiting was enforced.
@@ -377,25 +311,6 @@ class IPRateTracker:
         pipe.expire(denied_count_key, self.TTL_SECONDS)
 
         pipe.execute()
-
-        # Update Prometheus gauges (rate-limited)
-        self._maybe_update_denial_gauges(window)
-
-    def _maybe_update_denial_gauges(self, window):
-        """Update denial gauges periodically (independent of regular gauges)."""
-        now = time.time()
-        if now - self._last_denial_gauge_update < self._gauge_update_interval:
-            return
-        self._last_denial_gauge_update = now
-        self._update_denial_gauges(window)
-
-    def _update_denial_gauges(self, window):
-        """Update Prometheus gauges for denial tracking."""
-        denied_ips_key = f"ipr:denied_ips:{window}"
-
-        # Get count of unique denied IPs
-        denied_count = self.redis.scard(denied_ips_key)
-        WOULD_BE_DENIED_IPS.set(denied_count)
 
     def get_denied_requests(self, window=None, limit=100):
         """
@@ -462,14 +377,6 @@ SCANNER_404_TOTAL = Counter(
     "Total 404 responses by IP category",
     ["category"],  # suspicious_path, normal_404
 )
-SCANNER_IPS_CURRENT = Gauge(
-    "newsblur_scanner_ips_current",
-    "Current number of IPs flagged as scanners",
-)
-SCANNER_TOP_404_COUNT = Gauge(
-    "newsblur_scanner_top_404_count",
-    "404 count from highest-volume scanning IP",
-)
 
 
 class ScannerTracker:
@@ -491,7 +398,6 @@ class ScannerTracker:
     TTL_SECONDS = 3600  # 1 hour
     META_TTL_SECONDS = 7200  # 2 hours
     SCANNER_THRESHOLD = 10  # 404s per 5-min window to be flagged
-    MAX_SCANNER_METRICS = 20
 
     # Patterns that indicate vulnerability scanning
     SUSPICIOUS_PATTERNS = [
@@ -517,8 +423,6 @@ class ScannerTracker:
 
     def __init__(self):
         self._redis = None
-        self._last_gauge_update = 0
-        self._gauge_update_interval = 30
         self._suspicious_re = re.compile("|".join(self.SUSPICIOUS_PATTERNS), re.IGNORECASE)
 
     @property
@@ -586,40 +490,6 @@ class ScannerTracker:
 
         pipe.execute()
 
-        # Periodically update gauges
-        self._maybe_update_gauges(window)
-
-    def _maybe_update_gauges(self, window):
-        now = time.time()
-        if now - self._last_gauge_update < self._gauge_update_interval:
-            return
-        self._last_gauge_update = now
-        self._update_gauges(window)
-
-    def _update_gauges(self, window):
-        top_key = f"scan:top:{window}"
-        top_ips = self.redis.zrevrange(top_key, 0, self.MAX_SCANNER_METRICS - 1, withscores=True)
-
-        if not top_ips:
-            SCANNER_IPS_CURRENT.set(0)
-            SCANNER_TOP_404_COUNT.set(0)
-            return
-
-        scanner_count = 0
-        top_count = 0
-
-        for ip_bytes, count in top_ips:
-            count = int(count)
-
-            if count > top_count:
-                top_count = count
-
-            if count >= self.SCANNER_THRESHOLD:
-                scanner_count += 1
-
-        SCANNER_IPS_CURRENT.set(scanner_count)
-        SCANNER_TOP_404_COUNT.set(top_count)
-
     def get_ip_metadata(self, ip):
         meta_key = f"scan:meta:{ip}"
         return self.redis.hgetall(meta_key)
@@ -673,6 +543,206 @@ class ScannerTracker:
 
         return int(count) >= self.SCANNER_THRESHOLD
 
-    def force_update_gauges(self):
-        window = self.get_current_window()
-        self._update_gauges(window)
+
+# Prometheus metrics for attack detection
+ATTACK_DETECTED_TOTAL = Counter(
+    "newsblur_attack_detected_total",
+    "Total attack payloads detected and blocked",
+    ["attack_type"],
+)
+ATTACK_BANNED_CHECK_TOTAL = Counter(
+    "newsblur_attack_banned_check_total",
+    "Total requests blocked from already-banned IPs",
+)
+
+
+def _get_client_ip(request):
+    """
+    Extract the real client IP from a proxied request.
+
+    Relies on the known proxy chain: Client → HAProxy → Nginx → Django.
+    HAProxy's ``option forwardfor`` appends the real TCP source IP.
+    Nginx's ``$proxy_add_x_forwarded_for`` appends ``$remote_addr``.
+    Because nginx has ``set_real_ip_from 0.0.0.0/0``, its appended value
+    is the *leftmost* XFF entry (spoofable).  The real client IP is
+    therefore always second-to-last (index -2): the entry HAProxy added
+    from the TCP connection, which cannot be forged at the HTTP layer.
+
+    If XFF has fewer than 2 entries (e.g. dev without HAProxy), fall back
+    to the single entry or REMOTE_ADDR.
+    """
+    forwarded = request.META.get("HTTP_X_FORWARDED_FOR")
+    if forwarded:
+        parts = [p.strip() for p in forwarded.split(",")]
+        if len(parts) >= 2:
+            return parts[-2]
+        return parts[0]
+    return request.META.get("REMOTE_ADDR", "unknown")
+
+
+class AttackDetector:
+    """
+    Detect malicious payloads in request query strings, POST bodies, and paths.
+
+    Auto-bans IPs for 24 hours on first detection. Subsequent requests from
+    banned IPs are rejected immediately without payload inspection.
+
+    Redis keys (db 3, REDIS_STATISTICS_POOL):
+    - atk:ban:{ip} -> "1" with TTL (banned IP marker)
+    - atk:log:{ip} -> hash with attack details (for investigation)
+    """
+
+    BAN_TTL_SECONDS = 86400  # 24 hours
+
+    # Content types where POST body should be scanned (text-based only).
+    # Multipart uploads (file uploads) are skipped to avoid buffering large files.
+    SCANNABLE_CONTENT_TYPES = (
+        "application/x-www-form-urlencoded",
+        "application/json",
+        "text/plain",
+        "text/xml",
+        "application/xml",
+    )
+
+    # Max POST body bytes to read for scanning
+    MAX_BODY_SCAN_BYTES = 8192
+
+    # Attack patterns grouped by type for logging.
+    # Keep these tight to avoid false positives on legitimate content
+    # (archived web pages, RSS feeds, user comments often contain code snippets).
+    ATTACK_PATTERNS = {
+        "jndi": [
+            r"\$\{jndi:",  # Log4Shell: ${jndi:ldap://...} (was \$\{ which matched JS template literals)
+        ],
+        "xss": [
+            r"<\s*script[^a-zA-Z]",  # <script> tags (require non-alpha after to avoid <scriptName)
+        ],
+        "sqli": [
+            r"(?:UNION\s+(?:ALL\s+)?SELECT)",  # UNION SELECT
+            r"(?:;\s*DROP\s+TABLE)",  # ; DROP TABLE
+        ],
+        "traversal": [
+            r"\.\./\.\./\.\./",  # Path traversal (require 3+ levels to reduce false positives)
+        ],
+        "nullbyte": [
+            r"\x00",  # Null byte injection
+            r"%00",  # URL-encoded null byte
+        ],
+    }
+
+    def __init__(self):
+        self._redis = None
+        # Compile all patterns into a single regex for fast matching, plus keep
+        # individual type regexes for classification
+        self._type_patterns = {}
+        all_patterns = []
+        for attack_type, patterns in self.ATTACK_PATTERNS.items():
+            combined = "|".join(patterns)
+            self._type_patterns[attack_type] = re.compile(combined, re.IGNORECASE)
+            all_patterns.extend(patterns)
+        self._combined_re = re.compile("|".join(all_patterns), re.IGNORECASE)
+
+    @property
+    def redis(self):
+        if self._redis is None:
+            self._redis = redis.Redis(connection_pool=settings.REDIS_STATISTICS_POOL)
+        return self._redis
+
+    def get_ip(self, request):
+        return _get_client_ip(request)
+
+    def is_banned(self, ip):
+        """Check if an IP is currently banned. Fast Redis GET."""
+        try:
+            return bool(self.redis.get(f"atk:ban:{ip}"))
+        except Exception:
+            return False
+
+    def ban_ip(self, ip, attack_type, payload_sample, request):
+        """Ban an IP and store attack details for investigation."""
+        pipe = self.redis.pipeline()
+
+        # Set ban marker with TTL
+        ban_key = f"atk:ban:{ip}"
+        pipe.set(ban_key, "1", ex=self.BAN_TTL_SECONDS)
+
+        # Store attack log for investigation
+        log_key = f"atk:log:{ip}"
+        log_data = {
+            "attack_type": attack_type,
+            "payload_sample": payload_sample[:500],
+            "path": request.path[:200],
+            "user_agent": request.META.get("HTTP_USER_AGENT", "")[:200],
+            "banned_at": str(int(time.time())),
+        }
+        pipe.hset(log_key, mapping=log_data)
+        pipe.expire(log_key, self.BAN_TTL_SECONDS)
+
+        pipe.execute()
+
+    def classify_attack(self, payload):
+        """Return the attack type if payload matches, or None."""
+        for attack_type, pattern in self._type_patterns.items():
+            if pattern.search(payload):
+                return attack_type
+        return None
+
+    def _check_payload(self, payload):
+        """Check a single payload string for attack patterns. Returns (attack_type, sample) or (None, None)."""
+        if payload and self._combined_re.search(payload):
+            attack_type = self.classify_attack(payload)
+            if attack_type:
+                return attack_type, payload[:200]
+        return None, None
+
+    def check_request(self, request):
+        """
+        Inspect request for malicious payloads.
+
+        Checks raw and URL-decoded query strings, URL path, and POST body.
+        Returns (attack_type, payload_sample) if attack detected, or (None, None).
+        """
+        # Check query string (raw first, then decoded to catch encoded payloads).
+        # unquote_plus handles both %XX encoding and + as space (form encoding).
+        query_string = request.META.get("QUERY_STRING", "")
+        if query_string:
+            result = self._check_payload(query_string)
+            if result[0]:
+                return result
+            decoded_qs = unquote_plus(query_string)
+            if decoded_qs != query_string:
+                result = self._check_payload(decoded_qs)
+                if result[0]:
+                    return result
+
+        # Check URL path
+        result = self._check_payload(request.path)
+        if result[0]:
+            return result
+
+        # Check POST body for text-based content types only.
+        # Skip multipart/form-data (file uploads) to avoid buffering large files.
+        if request.method == "POST":
+            content_type = request.META.get("CONTENT_TYPE", "").split(";")[0].strip().lower()
+            if content_type in self.SCANNABLE_CONTENT_TYPES:
+                try:
+                    # Scan first MAX_BODY_SCAN_BYTES of any text POST. Django buffers
+                    # the full body for these content types anyway (request.POST / json),
+                    # so this adds no extra memory cost. Slicing limits regex work, not I/O.
+                    body = request.body[: self.MAX_BODY_SCAN_BYTES].decode("utf-8", errors="replace")
+                    result = self._check_payload(body)
+                    if result[0]:
+                        return result
+                    # Decode form bodies with unquote_plus (+ → space, %XX → char).
+                    # jQuery $.ajax default POSTs are form-encoded, so attack payloads
+                    # like %27+OR+1%3D1 must be decoded to ' OR 1=1 for regex matching.
+                    if content_type == "application/x-www-form-urlencoded":
+                        decoded_body = unquote_plus(body)
+                        if decoded_body != body:
+                            result = self._check_payload(decoded_body)
+                            if result[0]:
+                                return result
+                except Exception:
+                    pass
+
+        return None, None

@@ -1,3 +1,10 @@
+"""External REST API views for third-party NewsBlur clients.
+
+Provides the public API endpoints documented at newsblur.com/api -- feed
+subscriptions, story loading, sharing, and user authentication for mobile
+apps and browser extensions.
+"""
+
 import base64
 import datetime
 import os
@@ -381,10 +388,11 @@ def share_story(request, token=None):
     if not content or not title:
         importer = TextImporter(story=None, story_url=story_url, request=request, debug=settings.DEBUG)
         document = importer.fetch(skip_save=True, return_document=True)
-        if not content:
-            content = document["content"]
-        if not title:
-            title = document["title"]
+        if document:
+            if not content:
+                content = document["content"]
+            if not title:
+                title = document["title"]
 
     shared_story = (
         MSharedStory.objects.filter(user_id=profile.user.pk, story_feed_id=feed_id, story_guid=story_url)

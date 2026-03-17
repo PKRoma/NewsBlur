@@ -38,12 +38,39 @@ else
     HASH=$(echo -n "$WORKSPACE_NAME" | md5 | head -c 4)
     PORT_OFFSET=$((0x$HASH % 900 + 100))
 
-    WEB_PORT=$((8000 + PORT_OFFSET))
-    NODE_PORT=$((8008 + PORT_OFFSET))
-    NGINX_PORT=$((8100 + PORT_OFFSET))
-    HAPROXY_HTTP_PORT=$((8200 + PORT_OFFSET))
-    HAPROXY_HTTPS_PORT=$((8443 + PORT_OFFSET))
-    HAPROXY_STATS_PORT=$((1936 + PORT_OFFSET))
+    # Find a free port, skipping any already in use by other containers
+    find_free_port() {
+        local port=$1
+        while lsof -i :$port -P -n >/dev/null 2>&1; do
+            port=$((port + 1))
+        done
+        echo $port
+    }
+
+    # If docker-compose file already exists, read the actual ports from it
+    # instead of recalculating. find_free_port skips ports that are "in use",
+    # but on re-runs our own containers hold those ports, causing off-by-one.
+    COMPOSE_FILE=".worktree/docker-compose.${WORKSPACE_NAME}.yml"
+    if [ -f "$COMPOSE_FILE" ]; then
+        # Extract host ports from "- HOST:CONTAINER" mappings
+        _read_port() {
+            # Find the line with the container port and extract the host port
+            grep -E "^\s+- [0-9]+:$1\$" "$COMPOSE_FILE" | head -1 | sed 's/.*- \([0-9]*\):.*/\1/'
+        }
+        WEB_PORT=$(_read_port 8000)
+        NODE_PORT=$(_read_port 8008)
+        NGINX_PORT=$(_read_port 81)
+        HAPROXY_HTTP_PORT=$(_read_port 80)
+        HAPROXY_HTTPS_PORT=$(_read_port 443)
+        HAPROXY_STATS_PORT=$(_read_port 1936)
+    else
+        WEB_PORT=$(find_free_port $((8000 + PORT_OFFSET)))
+        NODE_PORT=$(find_free_port $((8008 + PORT_OFFSET)))
+        NGINX_PORT=$(find_free_port $((8100 + PORT_OFFSET)))
+        HAPROXY_HTTP_PORT=$(find_free_port $((8200 + PORT_OFFSET)))
+        HAPROXY_HTTPS_PORT=$(find_free_port $((8443 + PORT_OFFSET)))
+        HAPROXY_STATS_PORT=$(find_free_port $((1936 + PORT_OFFSET)))
+    fi
 fi
 
 # Helper function to render templates using sed (no external dependencies)

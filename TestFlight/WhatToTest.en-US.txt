@@ -1,0 +1,59 @@
+Latest improvements (Feb 28):
+- Fixed push notifications not working on TestFlight and App Store builds.
+
+Recent improvements (Feb 27):
+- Push notifications show feed favicons via Communication Notifications.
+- Story titles header pill bar with Discover, Options, Search, Mark Read.
+- Redesigned Add Site as SwiftUI sheet with autocomplete.
+- Redesigned story action buttons with modern styling.
+- Icons added to menus on Mac and iPad.
+- Scroll-to-hide toolbar synced with swipe-back gestures.
+- Search bar slides in/out instead of fading.
+- Premium Archive upgrade banner in Discover Sites popover.
+- Dismiss buttons for Ask AI and Add Site on Mac.
+- Improved theme selector pill contrast.
+- Fixed Catalyst split divider limited to grab handle.
+- Fixed (null) username and missing avatar when sharing on Catalyst.
+- Fixed Catalyst pill bar AppKit chrome artifacts.
+- Fixed Mac traverse bar layout, highlights, and previous button.
+- Fixed Discover popover placement on Mac and iPad.
+- Fixed sepia theme yellow tint on Catalyst.
+- Fixed white flash and navbar mismatch in dark themes.
+- Fixed story page rendering wider than viewport on iPhone.
+- Fixed blank statistics modal.
+- Fixed mark-read pill confirmation.
+- Fixed status bar color and liquid glass gradient.
+
+NewsBlur 14 is a major update with new features, a redesigned interface, and full support for iOS/iPadOS 26 and macOS Tahoe.
+
+New features:
+- Dashboard with favorite feeds, updated every five minutes.
+- Ask AI: ask questions about any story with your choice of AI model.
+- Pinch-to-zoom images to full-sized Quick Look preview.
+- List and Magazine story layouts.
+- Mark Story Read options: on scroll, selection, interval, or manually.
+- Premium Pro tier. Custom feed/folder icons. Unmute feeds.
+- Collapse-all / expand-all on All Site Stories.
+
+iOS/iPadOS 26 and macOS Tahoe:
+- Modernized menu bar with keyboard shortcuts.
+- Simplified column layout: feeds beside or over story detail.
+- Draggable column divider on iPad. Auto-collapse sidebar.
+- Sidebar toggle buttons. Transparent toolbar styling.
+- Sheet presentation for Share, Trainer, Ask AI on iPhone.
+- Nav bar fades when scrolling. Default theme changed to Auto.
+
+Redesigned screens:
+- Login with animated Metal shader waves and frosted glass.
+- Native PreferencesView. Premium upgrade with Ask AI and Pro tier.
+- Compact Ask AI and Share popovers. Subtle sync indicator.
+- Warmer Sepia theme with rewritten theme selector.
+
+Mac Catalyst:
+- Dismiss modals via overlay tap or Escape. Auto-hide sidebar.
+- Trackpad swipe gestures. Adjusted popover positioning.
+
+Bug fixes:
+- Fixed WebSocket disconnects, story width on first load, PINCache memory.
+- Fixed offline queue priority, saved stories read status, YouTube Error 153.
+- Fixed trainer popover, custom feed icon crashes, medium theme colors.

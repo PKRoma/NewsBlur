@@ -1,3 +1,10 @@
+"""Story content processing: HTML sanitization, text diffing, date formatting, and hashing.
+
+Core utilities for preparing story content for display -- strips unsafe HTML,
+generates content diffs between story versions, formats relative dates, and
+produces story content hashes for deduplication.
+"""
+
 import base64
 import datetime
 import hashlib
@@ -6,6 +13,7 @@ import html
 import re
 import struct
 import sys
+import urllib.parse
 from binascii import hexlify
 from hashlib import sha1
 from itertools import chain
@@ -26,6 +34,69 @@ from utils.tornado_escape import xhtml_unescape as xhtml_unescape_tornado
 
 # COMMENTS_RE = re.compile('\<![ \r\n\t]*(--([^\-]|[\r\n]|-[^\-])*--[ \r\n\t]*)\>')
 COMMENTS_RE = re.compile("\<!--.*?--\>")
+
+_IMG_SRC_RE = re.compile(r'<img[^>]+src=["\']([^"\']+)["\']', re.IGNORECASE)
+_CDN_PROXY_HOSTS = {"i0.wp.com", "i1.wp.com", "i2.wp.com", "i3.wp.com"}
+_SIZE_PREFIX_RE = re.compile(r"^[lsm]-")
+
+
+def _normalize_image_url_for_dedup(url):
+    """Strip scheme, query params, fragments, www., and CDN proxy hosts to get a canonical host+path."""
+    if not url:
+        return ""
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except Exception:
+        return url.lower()
+
+    # CDN services (Brightspot, etc.) embed source image URL in ?url= param
+    if parsed.query:
+        query_params = urllib.parse.parse_qs(parsed.query)
+        source_url = query_params.get("url", [None])[0]
+        if source_url:
+            return _normalize_image_url_for_dedup(source_url)
+
+    host = (parsed.netloc or "").lower()
+    path = parsed.path or ""
+
+    if host.startswith("www."):
+        host = host[4:]
+
+    # WordPress Photon CDN: i0.wp.com/example.com/path/image.jpg
+    if host in _CDN_PROXY_HOSTS:
+        inner = path.lstrip("/")
+        if "/" in inner:
+            host, path = inner.split("/", 1)[0].lower(), "/" + inner.split("/", 1)[1]
+        else:
+            host, path = inner.lower(), "/"
+        if host.startswith("www."):
+            host = host[4:]
+
+    # Strip CMS image size prefixes from filename (e.g., l-intro-1234.jpg → intro-1234.jpg)
+    if "/" in path:
+        directory, filename = path.rsplit("/", 1)
+        filename = _SIZE_PREFIX_RE.sub("", filename)
+        path = directory + "/" + filename
+
+    return host + path
+
+
+def _image_url_matches_content(media_url, story_content):
+    """Check if an image URL (or a variant with different scheme/params/CDN) already exists in content."""
+    if not media_url or not story_content:
+        return False
+    if media_url in story_content:
+        return True
+
+    normalized_media = _normalize_image_url_for_dedup(media_url)
+    if not normalized_media or len(normalized_media) < 8:
+        return False
+
+    for match in _IMG_SRC_RE.finditer(story_content):
+        if _normalize_image_url_for_dedup(match.group(1)) == normalized_media:
+            return True
+
+    return False
 
 
 def midnight_today(now=None):
@@ -128,6 +199,45 @@ def extract_story_date(entry):
     return publish_date
 
 
+EMBEDDABLE_IFRAME_DOMAINS = [
+    "youtube.com",
+    "youtube-nocookie.com",
+    "youtu.be",
+    "player.vimeo.com",
+    "www.google.com",
+    "w.soundcloud.com",
+    "open.spotify.com",
+    "bandcamp.com",
+]
+
+
+def strip_non_embeddable_iframes(content):
+    """Strip iframes from story content whose domains block cross-origin embedding.
+
+    Many sites (e.g. Slashdot) include iframes in their RSS feeds that set
+    X-Frame-Options: SAMEORIGIN, causing them to render as empty boxes.
+    Only keep iframes from domains known to allow cross-origin embedding.
+    """
+    if not content or "<iframe" not in content.lower():
+        return content
+
+    def replace_iframe(match):
+        iframe_html = match.group(0)
+        src_match = re.search(r'src=["\']([^"\']+)["\']', iframe_html)
+        if not src_match:
+            return ""
+        src = src_match.group(1)
+        try:
+            domain = urllib.parse.urlparse(src).hostname or ""
+        except Exception:
+            return ""
+        if any(domain == d or domain.endswith("." + d) for d in EMBEDDABLE_IFRAME_DOMAINS):
+            return iframe_html
+        return ""
+
+    return re.sub(r"<iframe\b[^>]*>.*?</iframe>", replace_iframe, content, flags=re.IGNORECASE | re.DOTALL)
+
+
 def pre_process_story(entry, encoding):
     entry["published"] = extract_story_date(entry)
 
@@ -191,8 +301,9 @@ def pre_process_story(entry, encoding):
                     "media_url": media_url,
                     "media_type": media_type,
                 }
-            elif "image" in media_type and media_url and media_url not in entry["story_content"]:
-                entry["story_content"] += """<br><br><img src="%s" />""" % media_url
+            elif "image" in media_type and media_url:
+                if not _image_url_matches_content(media_url, entry["story_content"]):
+                    entry["story_content"] += """<br><br><img src="%s" />""" % media_url
                 continue
             elif media_content.get("rel", "") == "alternative" or "text" in media_content.get("type", ""):
                 continue
@@ -217,8 +328,62 @@ def pre_process_story(entry, encoding):
         entry["author"] = strip_tags(entry.get("credit"))
 
     entry["story_content"] = attach_media_scripts(entry["story_content"])
+    entry["story_content"] = fix_responsive_embeds(entry["story_content"])
+    entry["story_content"] = strip_non_embeddable_iframes(entry["story_content"])
 
     return entry
+
+
+def fix_responsive_embeds(content):
+    """Fix responsive video embed pattern missing position styles.
+
+    Many sites use a div with height:0 + padding-bottom to create a 16:9 aspect
+    ratio container, with an iframe inside at width/height 100%. This requires
+    position:relative on the wrapper and position:absolute on the iframe, but
+    those styles often come from the site's CSS rather than inline styles. When
+    rendered in the reader without the site's CSS, the iframe collapses to 0 height.
+    """
+    if not content or "<iframe" not in content.lower():
+        return content
+
+    def fix_wrapper(match):
+        div_tag = match.group(1)
+        inner = match.group(2)
+        # Check if wrapper has height:0 and padding-bottom (responsive embed pattern)
+        style_match = re.search(r'style=["\']([^"\']*)["\']', div_tag, re.IGNORECASE)
+        if not style_match:
+            return match.group(0)
+        style = style_match.group(1)
+        has_zero_height = re.search(r"height\s*:\s*0", style)
+        has_padding_bottom = re.search(r"padding-bottom\s*:", style)
+        if not has_zero_height or not has_padding_bottom:
+            return match.group(0)
+        # Add position:relative to wrapper if missing
+        if "position" not in style.lower():
+            new_style = style.rstrip("; ") + "; position: relative;"
+            div_tag = div_tag.replace(style_match.group(1), new_style)
+
+        # Add position:absolute to child iframes if missing
+        def fix_iframe_position(iframe_match):
+            iframe_html = iframe_match.group(0)
+            iframe_style = re.search(r'style=["\']([^"\']*)["\']', iframe_html, re.IGNORECASE)
+            if iframe_style and "position" not in iframe_style.group(1).lower():
+                new_iframe_style = (
+                    iframe_style.group(1).rstrip("; ") + "; position: absolute; top: 0; left: 0;"
+                )
+                iframe_html = iframe_html.replace(iframe_style.group(1), new_iframe_style)
+            elif not iframe_style:
+                iframe_html = iframe_html.replace(
+                    "<iframe", '<iframe style="position: absolute; top: 0; left: 0;"', 1
+                )
+            return iframe_html
+
+        inner = re.sub(
+            r"<iframe\b[^>]*>.*?</iframe>", fix_iframe_position, inner, flags=re.IGNORECASE | re.DOTALL
+        )
+        return div_tag + inner + "</div>"
+
+    return re.sub(r"(<div\b[^>]*>)(.*?)</div>", fix_wrapper, content, flags=re.IGNORECASE | re.DOTALL)
 
 
 def attach_media_scripts(content):

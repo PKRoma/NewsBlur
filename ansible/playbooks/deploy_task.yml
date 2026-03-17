@@ -19,8 +19,10 @@
       git:
         repo: https://github.com/samuelclay/NewsBlur.git
         dest: /srv/newsblur/
-        version: main
+        version: "{{ git_branch }}"
       register: pulled
+      tags:
+        - always
 
     - block:
         - name: Reload celery
@@ -66,3 +68,14 @@
       tags:
         - never
         - start
+
+    - include_tasks:
+        file: ../roles/celery_task/tasks/container.yml
+        apply:
+          tags:
+            - restart
+      vars:
+        container_restart: true
+      tags:
+        - never
+        - restart

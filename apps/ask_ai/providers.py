@@ -1,14 +1,20 @@
+import re
 from abc import ABC, abstractmethod
 from typing import Generator, Optional
 
 import anthropic
 import openai
 from django.conf import settings
-
-from utils import log as logging
 from google import genai
 from google.genai import errors as genai_errors
 from google.genai import types as genai_types
+
+from utils import log as logging
+
+
+def _is_placeholder(key):
+    """Check if a key is a placeholder (e.g. 'sk-ant-XXXXXXXX...' from settings template)."""
+    return bool(re.match(r"^[\w-]*X{8,}$", key))
 
 
 class LLMProvider(ABC):
@@ -25,7 +31,9 @@ class LLMProvider(ABC):
         pass
 
     @abstractmethod
-    def stream_response(self, messages: list, model_id: str, thinking_config: Optional[dict] = None) -> Generator[str, None, None]:
+    def stream_response(
+        self, messages: list, model_id: str, thinking_config: Optional[dict] = None
+    ) -> Generator[str, None, None]:
         """Stream response chunks from the LLM."""
         pass
 
@@ -63,9 +71,12 @@ class AnthropicProvider(LLMProvider):
     """Anthropic/Claude provider implementation."""
 
     def is_configured(self) -> bool:
-        return bool(getattr(settings, "ANTHROPIC_API_KEY", None))
+        key = getattr(settings, "ANTHROPIC_API_KEY", None)
+        return bool(key) and key.startswith("sk-ant-") and not _is_placeholder(key)
 
-    def stream_response(self, messages: list, model_id: str, thinking_config: Optional[dict] = None) -> Generator[str, None, None]:
+    def stream_response(
+        self, messages: list, model_id: str, thinking_config: Optional[dict] = None
+    ) -> Generator[str, None, None]:
         client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
 
         # Extract system message and convert to Anthropic format
@@ -131,9 +142,12 @@ class OpenAIProvider(LLMProvider):
     """OpenAI provider implementation."""
 
     def is_configured(self) -> bool:
-        return bool(getattr(settings, "OPENAI_API_KEY", None))
+        key = getattr(settings, "OPENAI_API_KEY", None)
+        return bool(key) and key.startswith("sk-") and not _is_placeholder(key)
 
-    def stream_response(self, messages: list, model_id: str, thinking_config: Optional[dict] = None) -> Generator[str, None, None]:
+    def stream_response(
+        self, messages: list, model_id: str, thinking_config: Optional[dict] = None
+    ) -> Generator[str, None, None]:
         client = openai.OpenAI(api_key=settings.OPENAI_API_KEY)
         kwargs = {
             "model": model_id,
@@ -193,9 +207,12 @@ class XAIProvider(LLMProvider):
     """xAI/Grok provider implementation (OpenAI-compatible API)."""
 
     def is_configured(self) -> bool:
-        return bool(getattr(settings, "XAI_GROK_API_KEY", None))
+        key = getattr(settings, "XAI_GROK_API_KEY", None)
+        return bool(key) and key.startswith("xai-") and not _is_placeholder(key)
 
-    def stream_response(self, messages: list, model_id: str, thinking_config: Optional[dict] = None) -> Generator[str, None, None]:
+    def stream_response(
+        self, messages: list, model_id: str, thinking_config: Optional[dict] = None
+    ) -> Generator[str, None, None]:
         client = openai.OpenAI(
             api_key=settings.XAI_GROK_API_KEY,
             base_url="https://api.x.ai/v1",
@@ -255,9 +272,12 @@ class GeminiProvider(LLMProvider):
     """Google Gemini provider implementation."""
 
     def is_configured(self) -> bool:
-        return bool(getattr(settings, "GOOGLE_GEMINI_API_KEY", None))
+        key = getattr(settings, "GOOGLE_GEMINI_API_KEY", None)
+        return bool(key) and len(key) > 20 and not _is_placeholder(key)
 
-    def stream_response(self, messages: list, model_id: str, thinking_config: Optional[dict] = None) -> Generator[str, None, None]:
+    def stream_response(
+        self, messages: list, model_id: str, thinking_config: Optional[dict] = None
+    ) -> Generator[str, None, None]:
         client = genai.Client(api_key=settings.GOOGLE_GEMINI_API_KEY)
 
         # Extract system message for config

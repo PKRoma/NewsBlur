@@ -6,6 +6,7 @@ from apps.monitor.views import (
     AppTimes,
     AskAI,
     Classifiers,
+    Clustering,
     DbTimes,
     DeletedUsers,
     Discover,
@@ -15,6 +16,7 @@ from apps.monitor.views import (
     FeedSizes,
     LLMCosts,
     LoadTimes,
+    MediaPlayer,
     Stories,
     TasksCodes,
     TasksPipeline,
@@ -25,6 +27,7 @@ from apps.monitor.views import (
     Updates,
     Users,
     UserSearches,
+    WebFeedUsage,
 )
 
 urlpatterns = [
@@ -32,6 +35,7 @@ urlpatterns = [
     url(r"^app-times?$", AppTimes.as_view(), name="app_times"),
     url(r"^ask-ai?$", AskAI.as_view(), name="ask_ai"),
     url(r"^classifiers?$", Classifiers.as_view(), name="classifiers"),
+    url(r"^clustering?$", Clustering.as_view(), name="clustering"),
     url(r"^db-times?$", DbTimes.as_view(), name="db_times"),
     url(r"^deleted-users?$", DeletedUsers.as_view(), name="deleted_users"),
     url(r"^discover?$", Discover.as_view(), name="discover"),
@@ -40,6 +44,7 @@ urlpatterns = [
     url(r"^feed-sizes?$", FeedSizes.as_view(), name="feed_sizes"),
     url(r"^feeds?$", Feeds.as_view(), name="feeds"),
     url(r"^llm-costs?$", LLMCosts.as_view(), name="llm_costs"),
+    url(r"^media-player?$", MediaPlayer.as_view(), name="media_player"),
     url(r"^load-times?$", LoadTimes.as_view(), name="load_times"),
     url(r"^stories?$", Stories.as_view(), name="stories"),
     url(r"^task-codes?$", TasksCodes.as_view(), name="task_codes"),
@@ -51,4 +56,5 @@ urlpatterns = [
     url(r"^user-searches?$", UserSearches.as_view(), name="user_searches"),
     url(r"^trending-feeds?$", TrendingFeeds.as_view(), name="trending_feeds"),
     url(r"^trending-subscriptions?$", TrendingSubscriptions.as_view(), name="trending_subscriptions"),
+    url(r"^webfeed-usage?$", WebFeedUsage.as_view(), name="webfeed_usage"),
 ]

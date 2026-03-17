@@ -3,11 +3,14 @@ from django.conf.urls import include, url
 from django.conf.urls.static import static
 from django.contrib import admin
 from django.contrib.auth.views import LogoutView
+from django.contrib.sitemaps.views import sitemap
+from django.views.generic import RedirectView
 
 from apps.profile import views as profile_views
 from apps.reader import views as reader_views
 from apps.social import views as social_views
 from apps.static import views as static_views
+from apps.static.sitemaps import StaticSitemap
 
 admin.autodiscover()
 
@@ -15,8 +18,9 @@ urlpatterns = [
     url(r"^$", reader_views.index, name="index"),
     url(r"^reader/", include("apps.reader.urls")),
     url(r"^ask-ai/", include("apps.ask_ai.urls")),
+    url(r"^webfeed/", include("apps.webfeed.urls")),
     url(r"^welcome/?$", reader_views.welcome_req, name="welcome-page"),
-    url(r"^add/?", reader_views.index),
+    url(r"^add(?:/.*)?$", reader_views.index),
     url(r"^try/?", reader_views.index),
     url(r"^site/(?P<feed_id>\d+)?", reader_views.index),
     url(r"^folder/(?P<folder_name>\d+)?", reader_views.index, name="folder"),
@@ -25,14 +29,16 @@ urlpatterns = [
     url(r"^read/?", reader_views.index),
     url(r"^trending/?", reader_views.index),
     url(r"^archive/?$", reader_views.index),
+    url(r"^briefing-admin/?$", reader_views.index),
     url(r"^briefing/?$", reader_views.index),
-    url(r"^briefing/(?!stories|preferences|status|generate)", reader_views.index),
+    url(r"^briefing/(?!stories|preferences|status|generate|admin)", reader_views.index),
     url(r"^social/\d+/.*?", reader_views.index),
     url(r"^user/.*?", reader_views.index),
     url(r"^null/.*?", reader_views.index),
     url(r"^story/.*?", reader_views.index),
     url(r"^feed/?", social_views.shared_stories_rss_feed_noid),
     url(r"^rss_feeds/", include("apps.rss_feeds.urls")),
+    url(r"^discover/", include("apps.discover.urls")),
     url(r"^analyzer/", include("apps.analyzer.urls")),
     url(r"^classifier/", include("apps.analyzer.urls")),
     url(r"^folder_rss/", include("apps.profile.urls")),
@@ -43,6 +49,7 @@ urlpatterns = [
     url(r"^archive-assistant/", include("apps.archive_assistant.urls")),
     url(r"^recommendations/", include("apps.recommendations.urls")),
     url(r"^notifications/?", include("apps.notifications.urls")),
+    url(r"^media_player/", include("apps.media_player.urls")),
     url(r"^statistics/", include("apps.statistics.urls")),
     url(r"^social/", include("apps.social.urls")),
     url(r"^search/", include("apps.search.urls")),
@@ -59,6 +66,39 @@ urlpatterns = [
     url(r"^_dbcheck/redis", static_views.redis_check),
     url(r"^_dbcheck/elasticsearch", static_views.elasticsearch_check),
     url(r"^admin/", admin.site.urls),
+    url(r"^pricing/?$", static_views.pricing, name="pricing"),
+    url(r"^pricing/premium/?$", static_views.pricing_premium, name="pricing-premium"),
+    url(r"^pricing/archive/?$", static_views.pricing_archive, name="pricing-archive"),
+    url(r"^pricing/pro/?$", static_views.pricing_pro, name="pricing-pro"),
+    url(r"^features/?$", static_views.features, name="features"),
+    url(
+        r"^features/intelligence-training/?$",
+        static_views.feature_intelligence_training,
+        name="feature-intelligence-training",
+    ),
+    url(r"^features/ask-ai/?$", static_views.feature_ask_ai, name="feature-ask-ai"),
+    url(r"^features/web-feeds/?$", static_views.feature_web_feeds, name="feature-web-feeds"),
+    url(r"^features/newsletters/?$", static_views.feature_newsletters, name="feature-newsletters"),
+    url(r"^features/search/?$", static_views.feature_search, name="feature-search"),
+    url(r"^features/archive/?$", static_views.feature_archive, name="feature-archive"),
+    url(r"^features/saved-stories/?$", static_views.feature_saved_stories, name="feature-saved-stories"),
+    url(r"^features/native-apps/?$", static_views.feature_native_apps, name="feature-native-apps"),
+    url(r"^compare/feedly/?", static_views.compare_feedly, name="compare-feedly"),
+    url(r"^compare/inoreader/?", static_views.compare_inoreader, name="compare-inoreader"),
+    url(r"^compare/readwise-reader/?", static_views.compare_readwise, name="compare-readwise"),
+    url(r"^compare/the-old-reader/?", static_views.compare_the_old_reader, name="compare-the-old-reader"),
+    url(r"^alternative/open-source-rss-reader/?", static_views.alt_open_source, name="alt-open-source"),
+    url(r"^alternative/self-hosted-rss-reader/?", static_views.alt_self_hosted, name="alt-self-hosted"),
+    url(r"^alternative/google-reader/?", static_views.alt_google_reader, name="alt-google-reader"),
+    url(r"^alternative/feedly/?", static_views.alt_feedly, name="alt-feedly"),
+    url(r"^alternative/inoreader/?", static_views.alt_inoreader, name="alt-inoreader"),
+    url(r"^compare/feedbin/?", static_views.compare_feedbin, name="compare-feedbin"),
+    url(
+        r"^sitemap\.xml$",
+        sitemap,
+        {"sitemaps": {"static": StaticSitemap}},
+        name="django.contrib.sitemaps.views.sitemap",
+    ),
     url(r"^about/?", static_views.about, name="about"),
     url(r"^faq/?", static_views.faq, name="faq"),
     url(r"^api/?$", static_views.api, name="api"),
@@ -91,6 +131,9 @@ urlpatterns = [
     url(r"^android/?", static_views.android, name="android-static"),
     url(r"^firefox/?", static_views.firefox, name="firefox"),
     url(r"zebra/", include("zebra.urls", namespace="zebra")),
+    url(r"^login/?$", RedirectView.as_view(pattern_name="login", permanent=True)),
+    url(r"^signup/?$", RedirectView.as_view(pattern_name="signup", permanent=True)),
+    url(r"^forgot-password/?$", RedirectView.as_view(pattern_name="profile-forgot-password", permanent=True)),
     url(r"^account/redeem_code/?$", profile_views.redeem_code, name="redeem-code"),
     url(r"^account/login/?$", profile_views.login, name="login"),
     url(r"^account/signup/?$", profile_views.signup, name="signup"),

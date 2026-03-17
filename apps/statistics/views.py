@@ -1,3 +1,5 @@
+"""Statistics views: dashboard graphs, feedback tables, and revenue reports."""
+
 import base64
 import datetime
 import pickle
@@ -45,11 +47,12 @@ def revenue(request):
         report["output"].replace("\n", "<br>"),
     )
 
+    yesterday = datetime.datetime.now() - datetime.timedelta(days=1)
     story = {
-        "title": "Daily snapshot: %s" % (datetime.datetime.now().strftime("%a %b %-d, %Y")),
+        "title": "Daily snapshot: %s" % (yesterday.strftime("%a %b %-d, %Y")),
         "link": "https://www.newsblur.com",
         "description": content,
-        "unique_id": datetime.datetime.now().strftime("%a %b %-d, %Y"),
+        "unique_id": yesterday.strftime("%a %b %-d, %Y"),
         "pubdate": datetime.datetime.now(),
     }
     rss.add_item(**story)

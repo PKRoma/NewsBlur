@@ -1,3 +1,10 @@
+"""RSS feed and story models: Feed (PostgreSQL), MStory (MongoDB), and feed page/icon storage.
+
+Feed stores feed metadata and scheduling in PostgreSQL. MStory stores story
+content in MongoDB. Additional models handle feed pages, favicons, fetch
+history, and duplicate feed detection.
+"""
+
 import base64
 import csv
 import datetime
@@ -124,6 +131,9 @@ class Feed(models.Model):
     class Meta:
         db_table = "feeds"
         ordering = ["feed_title"]
+        indexes = [
+            models.Index(fields=["is_forbidden"], name="feeds_is_forbidden_idx"),
+        ]
         # unique_together=[('feed_address', 'feed_link')]
 
     def __str__(self):
@@ -225,6 +235,10 @@ class Feed(models.Model):
         )
 
     @property
+    def is_webfeed(self):
+        return self.feed_address.startswith("webfeed:")
+
+    @property
     def is_daily_briefing(self):
         return self.feed_address.startswith("daily-briefing:")
 
@@ -239,7 +253,7 @@ class Feed(models.Model):
             "updated_seconds_ago": seconds_timesince(self.last_update),
             "fs_size_bytes": self.fs_size_bytes,
             "archive_count": self.archive_count,
-            "last_story_date": self.last_story_date,
+            "last_story_date": self.last_story_date.isoformat() if self.last_story_date else None,
             "last_story_seconds_ago": seconds_timesince(self.last_story_date),
             "stories_last_month": self.stories_last_month,
             "average_stories_per_month": self.average_stories_per_month,
@@ -247,6 +261,7 @@ class Feed(models.Model):
             "subs": self.num_subscribers,
             "is_push": self.is_push,
             "is_newsletter": self.is_newsletter,
+            "is_webfeed": self.is_webfeed,
             "is_daily_briefing": self.is_daily_briefing,
             "fetched_once": self.fetched_once,
             "search_indexed": self.search_indexed,
@@ -288,6 +303,9 @@ class Feed(models.Model):
         return feed
 
     def save(self, *args, **kwargs):
+        if kwargs.get("force_update") and not self.pk:
+            logging.debug(" ---> ~FRFeed.save(force_update=True) with no pk, skipping")
+            return
         if not self.last_update:
             self.last_update = datetime.datetime.utcnow()
         if not self.next_scheduled_update:
@@ -369,7 +387,12 @@ class Feed(models.Model):
         min_subscribers = 1
         if settings.DEBUG:
             min_subscribers = 0
-        if self.num_subscribers > min_subscribers and not self.branch_from_feed and not self.is_newsletter:
+        if (
+            self.num_subscribers > min_subscribers
+            and not self.branch_from_feed
+            and not self.is_newsletter
+            and not self.is_webfeed
+        ):
             SearchFeed.index(
                 feed_id=self.pk,
                 title=self.feed_title,
@@ -399,10 +422,10 @@ class Feed(models.Model):
             logging.debug(f" ---> ~FBNo premium archive subscribers, skipping discover index for {self}")
             return
 
-        stories = MStory.objects(story_feed_id=self.pk)
+        stories = MStory.objects(story_feed_id=self.pk).order_by("-story_date")[:1000]
         for index, story in enumerate(stories):
             if index % 100 == 0:
-                logging.debug(f" ---> ~FBIndexing discover story {index} of {len(stories)} in {self}")
+                logging.debug(f" ---> ~FBIndexing discover story {index} in {self}")
             story.index_story_for_discover()
 
         self.discover_indexed = True
@@ -447,13 +470,11 @@ class Feed(models.Model):
         return [f for f in feed_ids if f not in briefing_ids]
 
     @classmethod
-    def autocomplete(cls, prefix, limit=5):
-        # Fast text search first
-        results = SearchFeed.query(prefix, max_results=limit)
-
-        # Fall back to hybrid (semantic) search if no text results
-        if not results:
-            results = SearchFeed.hybrid_query(prefix, max_results=limit)
+    def autocomplete(cls, prefix, limit=10):
+        # Use hybrid search to combine text matching with semantic similarity
+        # This returns both exact matches (e.g., "cooking" in title) and
+        # semantically related feeds (e.g., "smitten kitchen" for "cooking")
+        results = SearchFeed.hybrid_query(prefix, max_results=limit)
 
         feed_ids = [result["_source"]["feed_id"] for result in results[:limit]]
         return feed_ids
@@ -529,7 +550,15 @@ class Feed(models.Model):
 
     @classmethod
     def get_feed_from_url(
-        cls, url, create=True, aggressive=False, fetch=True, offset=0, user=None, interactive=False
+        cls,
+        url,
+        create=True,
+        aggressive=False,
+        fetch=True,
+        offset=0,
+        user=None,
+        interactive=False,
+        max_stories=None,
     ):
         feed = None
         without_rss = False
@@ -540,6 +569,13 @@ class Feed(models.Model):
                 return cls.objects.get(feed_address=url)
             except cls.MultipleObjectsReturned:
                 return cls.objects.filter(feed_address=url)[0]
+        if url and url.startswith("webfeed:"):
+            try:
+                return cls.objects.get(feed_address=url)
+            except cls.MultipleObjectsReturned:
+                return cls.objects.filter(feed_address=url)[0]
+            except cls.DoesNotExist:
+                return None
         if url and re.match("(https?://)?twitter.com/\w+/?", url):
             without_rss = True
         if url and re.match(r"(https?://)?(www\.)?facebook.com/\w+/?$", url):
@@ -563,6 +599,13 @@ class Feed(models.Model):
         if url and "youtube.com/feeds" in url:
             without_rss = True
         if url and "youtube.com/playlist" in url:
+            without_rss = True
+        if url and "reddit.com/r/" in url and url.endswith(".rss"):
+            without_rss = True
+        if url and "/wp-json/wp/v2/posts" in url:
+            if "_embed" not in url:
+                separator = "&" if "?" in url else "?"
+                url = f"{url}{separator}_embed=true"
             without_rss = True
 
         def criteria(key, value):
@@ -644,12 +687,16 @@ class Feed(models.Model):
                 if feed and len(feed) > offset:
                     feed = feed[offset]
                     logging.debug(" ---> Feed exists (%s), updating..." % (feed))
-                    feed = feed.update()
+                    feed = feed.update(max_stories=max_stories)
                 elif create:
                     logging.debug(" ---> Feed doesn't exist, creating: %s" % (feed_finder_url))
                     try:
                         feed = cls.objects.create(feed_address=feed_finder_url)
-                        feed = feed.update()
+                        if not feed.pk:
+                            feed = by_url(feed_finder_url)
+                            feed = feed[offset] if feed and len(feed) > offset else None
+                        else:
+                            feed = feed.update(max_stories=max_stories)
                     except IntegrityError:
                         feed = by_url(feed_finder_url)
                         feed = feed[offset] if feed and len(feed) > offset else None
@@ -657,7 +704,13 @@ class Feed(models.Model):
                 logging.debug(" ---> Found without_rss feed: %s / %s" % (url, original_url))
                 try:
                     feed = cls.objects.create(feed_address=url, feed_link=original_url)
-                    feed = feed.update(requesting_user_id=user.pk if user else None)
+                    if not feed.pk:
+                        feed = by_url(url)
+                        feed = feed[offset] if feed and len(feed) > offset else None
+                    else:
+                        feed = feed.update(
+                            requesting_user_id=user.pk if user else None, max_stories=max_stories
+                        )
                 except IntegrityError:
                     feed = by_url(url)
                     feed = feed[offset] if feed and len(feed) > offset else None
@@ -665,16 +718,55 @@ class Feed(models.Model):
         # Check for JSON feed
         if not feed and fetch and create:
             try:
-                r = requests.get(url)
-            except (requests.ConnectionError, requests.models.InvalidURL):
+                r = requests.get(url, timeout=10)
+            except (
+                requests.ConnectionError,
+                requests.models.InvalidURL,
+                requests.ReadTimeout,
+                requests.exceptions.MissingSchema,
+                requests.exceptions.InvalidSchema,
+            ):
                 r = None
-            if r and "application/json" in r.headers.get("Content-Type"):
+            if r and "application/json" in (r.headers.get("Content-Type") or ""):
                 try:
                     feed = cls.objects.create(feed_address=url)
-                    feed = feed.update()
+                    if not feed.pk:
+                        feed = by_url(url)
+                        feed = feed[offset] if feed and len(feed) > offset else None
+                    else:
+                        feed = feed.update(max_stories=max_stories)
                 except IntegrityError:
                     feed = by_url(url)
                     feed = feed[offset] if feed and len(feed) > offset else None
+
+        # ScrapingBee fallback for blocked feeds (manual user add only)
+        if not feed and fetch and create and user:
+            try:
+                from utils.feed_fetcher import fetch_url_with_scrapingbee
+
+                logging.debug(" ---> Trying ScrapingBee fallback for feed discovery: %s" % url)
+                status_code, body = fetch_url_with_scrapingbee(url)
+                if status_code == 200 and body:
+                    import feedparser as fp
+
+                    parsed = fp.parse(body)
+                    if parsed.entries or parsed.feed.get("title") or parsed.version:
+                        logging.debug(" ---> ScrapingBee found valid feed: %s" % url)
+                        try:
+                            feed = cls.objects.create(feed_address=url)
+                            if not feed.pk:
+                                feed = by_url(url)
+                                feed = feed[offset] if feed and len(feed) > offset else None
+                            else:
+                                feed.is_forbidden = True
+                                feed.date_forbidden = datetime.datetime.now()
+                                feed.save(update_fields=["is_forbidden", "date_forbidden"])
+                                feed = feed.update(fpf=parsed)
+                        except IntegrityError:
+                            feed = by_url(url)
+                            feed = feed[offset] if feed and len(feed) > offset else None
+            except Exception as e:
+                logging.debug(" ---> ScrapingBee feed discovery fallback error: %s" % str(e))
 
         # Still nothing? Maybe the URL has some clues.
         if not feed and fetch and len(found_feed_urls):
@@ -683,7 +775,11 @@ class Feed(models.Model):
             if not feed and create:
                 try:
                     feed = cls.objects.create(feed_address=feed_finder_url)
-                    feed = feed.update()
+                    if not feed.pk:
+                        feed = by_url(feed_finder_url)
+                        feed = feed[offset] if feed and len(feed) > offset else None
+                    else:
+                        feed = feed.update(max_stories=max_stories)
                 except IntegrityError:
                     feed = by_url(feed_finder_url)
                     feed = feed[offset] if feed and len(feed) > offset else None
@@ -1315,29 +1411,36 @@ class Feed(models.Model):
         if not current_counts:
             current_counts = []
 
-        # Count stories, aggregate by year and month. Map Reduce!
-        map_f = """
-            function() {
-                var date = (this.story_date.getFullYear()) + "-" + (this.story_date.getMonth()+1);
-                var hour = this.story_date.getUTCHours();
-                var day = this.story_date.getDay();
-                emit(this.story_hash, {'month': date, 'hour': hour, 'day': day});
-            }
-        """
-        reduce_f = """
-            function(key, values) {
-                return values;
-            }
-        """
+        # Count stories grouped by year/month/hour/day using aggregation pipeline
+        # (replaces MapReduce to avoid MongoDB's server-side JS lock contention)
         dates = defaultdict(int)
         hours = defaultdict(int)
         days = defaultdict(int)
-        results = MStory.objects(story_feed_id=self.pk).map_reduce(map_f, reduce_f, output="inline")
-        for result in results:
-            dates[result.value["month"]] += 1
-            hours[int(result.value["hour"])] += 1
-            days[int(result.value["day"])] += 1
-            year = int(re.findall(r"(\d{4})-\d{1,2}", result.value["month"])[0])
+        pipeline = [
+            {"$match": {"story_feed_id": self.pk}},
+            {
+                "$group": {
+                    "_id": {
+                        "year": {"$year": "$story_date"},
+                        "month": {"$month": "$story_date"},
+                        "hour": {"$hour": "$story_date"},
+                        "day": {"$dayOfWeek": "$story_date"},
+                    },
+                    "count": {"$sum": 1},
+                }
+            },
+        ]
+        for result in MStory._get_collection().aggregate(pipeline):
+            year = result["_id"]["year"]
+            month = result["_id"]["month"]
+            hour = result["_id"]["hour"]
+            # $dayOfWeek: 1=Sun..7=Sat -> JS getDay(): 0=Sun..6=Sat
+            day = result["_id"]["day"] - 1
+            count = result["count"]
+            key = "%s-%s" % (year, month)
+            dates[key] += count
+            hours[hour] += count
+            days[day] += count
             if year < min_year and year > 2000:
                 min_year = year
 
@@ -1388,33 +1491,22 @@ class Feed(models.Model):
         )
 
         def calculate_scores(cls, facet):
-            map_f = """
-                function() {
-                    emit(this["%s"], {
-                        pos: this.score>0 ? this.score : 0, 
-                        neg: this.score<0 ? Math.abs(this.score) : 0
-                    });
-                }
-            """ % (
-                facet
-            )
-            reduce_f = """
-                function(key, values) {
-                    var result = {pos: 0, neg: 0};
-                    values.forEach(function(value) {
-                        result.pos += value.pos;
-                        result.neg += value.neg;
-                    });
-                    return result;
-                }
-            """
+            pipeline = [
+                {"$match": {"feed_id": self.pk}},
+                {
+                    "$group": {
+                        "_id": "$" + facet,
+                        "pos": {"$sum": {"$cond": [{"$gt": ["$score", 0]}, "$score", 0]}},
+                        "neg": {"$sum": {"$cond": [{"$lt": ["$score", 0]}, {"$abs": "$score"}, 0]}},
+                    }
+                },
+            ]
             scores = []
-            res = cls.objects(feed_id=self.pk).map_reduce(map_f, reduce_f, output="inline")
-            for r in res:
-                facet_values = dict([(k, int(v)) for k, v in r.value.items()])
-                facet_values[facet] = r.key
-                if facet_values["pos"] + facet_values["neg"] >= 1:
-                    scores.append(facet_values)
+            for r in cls._get_collection().aggregate(pipeline):
+                pos = int(r["pos"])
+                neg = int(r["neg"])
+                if pos + neg >= 1:
+                    scores.append({"pos": pos, "neg": neg, facet: r["_id"]})
             scores = sorted(scores, key=lambda v: v["neg"] - v["pos"])
 
             return scores
@@ -1467,9 +1559,26 @@ class Feed(models.Model):
 
         return ua
 
-    def fetch_headers(self, fake=False):
+    @property
+    def plain_user_agent(self):
+        """NewsBlur Feed Fetcher UA without the fake browser suffix.
+        Used as a fallback when the browser UA triggers bot challenges (e.g. Anubis)."""
+        ua = "NewsBlur Feed Fetcher - %s subscriber%s - %s" % (
+            self.num_subscribers,
+            "s" if self.num_subscribers != 1 else "",
+            self.permalink,
+        )
+        return ua
+
+    def fetch_headers(self, fake=False, plain=False):
+        if plain:
+            ua = self.plain_user_agent
+        elif fake:
+            ua = self.fake_user_agent
+        else:
+            ua = self.user_agent
         headers = {
-            "User-Agent": self.user_agent if not fake else self.fake_user_agent,
+            "User-Agent": ua,
             "Accept": "application/atom+xml, application/rss+xml, application/xml;q=0.8, text/xml;q=0.6, */*;q=0.2",
             "Accept-Encoding": "gzip, deflate",
         }
@@ -1477,6 +1586,9 @@ class Feed(models.Model):
         return headers
 
     def update(self, **kwargs):
+        if self.pk is None:
+            logging.info(" ---> ~FRFeed.update() called with pk=None, skipping")
+            return None
         try:
             from utils import feed_fetcher
         except ImportError as e:
@@ -1501,6 +1613,7 @@ class Feed(models.Model):
             "feed_xml": kwargs.get("feed_xml"),
             "requesting_user_id": kwargs.get("requesting_user_id", None),
             "archive_page": kwargs.get("archive_page", None),
+            "max_stories": kwargs.get("max_stories"),
         }
 
         if getattr(settings, "TEST_DEBUG", False) and "NEWSBLUR_DIR" in self.feed_address:
@@ -1519,6 +1632,8 @@ class Feed(models.Model):
             if not feed.fetched_once:
                 feed.fetched_once = True
                 feed.save(update_fields=["fetched_once"])
+        elif self.is_webfeed:
+            feed = self.update_webfeed()
         else:
             disp = feed_fetcher.Dispatcher(options, 1)
             disp.add_jobs([[self.pk]])
@@ -1548,6 +1663,27 @@ class Feed(models.Model):
 
         icon_importer = IconImporter(self)
         icon_importer.save()
+
+        return self
+
+    def update_webfeed(self):
+        from utils.webfeed_fetcher import WebFeedFetcher
+
+        # Only fetch if at least one archive subscriber exists
+        if self.archive_subscribers <= 0:
+            logging.debug(
+                "   ---> [%-30s] ~FYWeb Feed: Skipping fetch, no archive subscribers" % (self.log_title[:30],)
+            )
+            return self
+
+        fetcher = WebFeedFetcher(self)
+        fpf = fetcher.fetch()
+
+        if fpf:
+            from utils.feed_fetcher import ProcessFeed
+
+            processor = ProcessFeed(self.pk, fpf, {"verbose": False, "updates_off": False, "force": True})
+            processor.process()
 
         return self
 
@@ -1738,8 +1874,6 @@ class Feed(models.Model):
                         )
                 if self.search_indexed:
                     existing_story.index_story_for_search()
-                if existing_story.story_hash:
-                    discover_story_ids.append(existing_story.story_hash)
             else:
                 ret_values["same"] += 1
                 if verbose:
@@ -1748,19 +1882,29 @@ class Feed(models.Model):
                         % (story.get("story_hash"), story.get("guid"), story.get("title"))
                     )
 
-        # If there are no premium archive subscribers, don't index stories for discover.
+        # Only index new stories for discover on feeds that have already been bulk-indexed
+        # (i.e., a user has used the Discover feature, triggering index_stories_for_discover).
         if discover_story_ids:
-            if self.archive_subscribers and self.archive_subscribers > 0:
-                # IndexDiscoverStories.apply_async(
-                # Run immediately
-                IndexDiscoverStories.apply(
+            if self.discover_indexed and self.archive_subscribers and self.archive_subscribers > 0:
+                IndexDiscoverStories.apply_async(
                     kwargs=dict(story_ids=discover_story_ids),
                     queue="discover_indexer",
                     time_limit=settings.MAX_SECONDS_ARCHIVE_FETCH_SINGLE_FEED,
                 )
-            else:
-                logging.debug(
-                    f" ---> ~FBNo premium archive subscribers, skipping discover indexing for {discover_story_ids} for {self}"
+            elif not self.discover_indexed:
+                logging.debug(f" ---> ~FBSkipping discover queue for {self}: not discover-indexed")
+            elif not self.archive_subscribers or self.archive_subscribers <= 0:
+                logging.debug(f" ---> ~FBSkipping discover queue for {self}: no archive subscribers")
+
+        # Schedule story clustering for feeds with archive subscribers
+        if discover_story_ids and self.archive_subscribers and self.archive_subscribers > 0:
+            from apps.clustering.tasks import ComputeStoryClusters
+
+            r_update = redis.Redis(connection_pool=settings.REDIS_FEED_UPDATE_POOL)
+            if r_update.set("cluster_queued:%s" % self.pk, 1, nx=True, ex=60 * 60 * 6):
+                ComputeStoryClusters.apply_async(
+                    kwargs=dict(feed_id=self.pk),
+                    queue="update_feeds",
                 )
 
         return ret_values
@@ -1788,12 +1932,16 @@ class Feed(models.Model):
 
     def save_popular_tags(self, feed_tags=None, verbose=False):
         if not feed_tags:
-            all_tags = MStory.objects(story_feed_id=self.pk, story_tags__exists=True).item_frequencies(
-                "story_tags"
-            )
-            feed_tags = sorted(
-                [(k, v) for k, v in list(all_tags.items()) if int(v) > 0], key=itemgetter(1), reverse=True
-            )[:25]
+            # Use aggregation pipeline instead of item_frequencies (which uses MapReduce)
+            pipeline = [
+                {"$match": {"story_feed_id": self.pk, "story_tags": {"$exists": True}}},
+                {"$unwind": "$story_tags"},
+                {"$group": {"_id": "$story_tags", "count": {"$sum": 1}}},
+                {"$match": {"count": {"$gt": 0}}},
+                {"$sort": {"count": -1}},
+                {"$limit": 25},
+            ]
+            feed_tags = [(r["_id"], r["count"]) for r in MStory._get_collection().aggregate(pipeline)]
         popular_tags = json.encode(feed_tags)
         if verbose:
             print("Found %s tags: %s" % (len(feed_tags), popular_tags))
@@ -1816,12 +1964,14 @@ class Feed(models.Model):
 
     def save_popular_authors(self, feed_authors=None):
         if not feed_authors:
-            authors = defaultdict(int)
-            for story in MStory.objects(story_feed_id=self.pk).only("story_author_name"):
-                authors[story.story_author_name] += 1
-            feed_authors = sorted(
-                [(k, v) for k, v in list(authors.items()) if k], key=itemgetter(1), reverse=True
-            )[:20]
+            # Use aggregation pipeline instead of iterating all stories in Python
+            pipeline = [
+                {"$match": {"story_feed_id": self.pk, "story_author_name": {"$nin": [None, ""]}}},
+                {"$group": {"_id": "$story_author_name", "count": {"$sum": 1}}},
+                {"$sort": {"count": -1}},
+                {"$limit": 20},
+            ]
+            feed_authors = [(r["_id"], r["count"]) for r in MStory._get_collection().aggregate(pipeline)]
 
         popular_authors = json.encode(feed_authors)
         if len(popular_authors) < 1023:
@@ -2091,7 +2241,7 @@ class Feed(models.Model):
         # Extract story authors from feeds
         for feed in sorted_popularity:
             story_ids = feed["story_ids"]
-            stories_db = MStory.objects(story_hash__in=story_ids)
+            stories_db = MStory.objects(story_hash__in=story_ids).order_by()
             stories = cls.format_stories(stories_db)
             for story in stories:
                 story["story_permalink"] = story["story_permalink"][:250]
@@ -3534,6 +3684,8 @@ class MStory(mongo.Document):
         if story_hash:
             story_id = story_hash
         story_hash = cls.ensure_story_hash(story_id, story_feed_id)
+        if not story_hash:
+            return None, False
         if not story_feed_id:
             story_feed_id, _ = cls.split_story_hash(story_hash)
         if isinstance(story_id, ObjectId):
@@ -3599,6 +3751,10 @@ class MStory(mongo.Document):
 
     @classmethod
     def ensure_story_hash(cls, story_id, story_feed_id):
+        if not story_id:
+            return None
+        if not isinstance(story_id, str):
+            story_id = str(story_id)
         if not cls.RE_STORY_HASH.match(story_id):
             story_id = "%s:%s" % (
                 story_feed_id,
@@ -3609,6 +3765,8 @@ class MStory(mongo.Document):
 
     @classmethod
     def split_story_hash(cls, story_hash):
+        if not story_hash:
+            return None, None
         matches = cls.RE_STORY_HASH.match(story_hash)
         if matches:
             groups = matches.groups()
@@ -4622,6 +4780,11 @@ def merge_feeds(original_feed_id, duplicate_feed_id, force=False):
         #     logging.info(" ---> Deleting %s %s" % (duplicate_stories.count(), model))
         duplicate_stories.delete()
 
+    # Clear Redis story hashes before bulk-deleting stories, since queryset
+    # .delete() bypasses the instance MStory.delete() / remove_from_redis().
+    r = redis.Redis(connection_pool=settings.REDIS_STORY_HASH_POOL)
+    r.delete("F:%s" % duplicate_feed.pk)
+    r.delete("zF:%s" % duplicate_feed.pk)
     delete_story_feed(MStory, "story_feed_id")
     delete_story_feed(MFeedPage, "feed_id")
     delete_story_feed(MFeedIcon, "feed_id")

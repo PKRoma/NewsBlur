@@ -2,18 +2,21 @@ NEWSBLUR.Router = Backbone.Router.extend({
 
     routes: {
         "welcome": "welcome",
-        "add/?": "add_site",
+        "add/:tab/:category/:subcategory": "add_site",
+        "add/:tab/:category": "add_site",
+        "add/:tab": "add_site",
+        "add": "add_site",
         "try/?": "try_site",
         "site/:site_id/:slug": "site",
         "site/:site_id/": "site",
         "site/:site_id": "site",
         "read": "read",
-        "trending": "trending",
         "archive": "archive",
         "saved": "starred",
         "saved/:tag": "starred",
         "folder/saved": "starred",
         "folder/saved/:tag": "starred",
+        "briefing-admin": "briefing_admin",
         "briefing": "briefing",
         "briefing/:section": "briefing_section",
         "folder/:folder_name": "folder",
@@ -28,9 +31,22 @@ NEWSBLUR.Router = Backbone.Router.extend({
         // No-op: keep URL as /welcome
     },
 
-    add_site: function () {
-        NEWSBLUR.log(["add", window.location, $.getQueryString('url')]);
-        NEWSBLUR.reader.open_add_feed_modal({ url: $.getQueryString('url') });
+    add_site: function (tab, category, subcategory) {
+        var url = $.getQueryString('url');
+        if (url) {
+            // If ?url= parameter is present, open the quick add modal
+            NEWSBLUR.log(["add modal", window.location, url]);
+            NEWSBLUR.reader.open_add_feed_modal({ url: url });
+        } else {
+            // Otherwise open the full Add + Discover page
+            NEWSBLUR.log(["add site", window.location, tab, category, subcategory]);
+            NEWSBLUR.reader.open_add_site({
+                router: true,
+                tab: tab || null,
+                category: category || null,
+                subcategory: subcategory || null
+            });
+        }
     },
 
     try_site: function () {
@@ -45,6 +61,9 @@ NEWSBLUR.Router = Backbone.Router.extend({
         if (query) {
             NEWSBLUR.reader.flags.searching = true;
             NEWSBLUR.reader.flags.search = query;
+        }
+        if (NEWSBLUR.welcome && NEWSBLUR.welcome.is_mobile()) {
+            NEWSBLUR.welcome.activate_mobile_layout();
         }
         if (feed) {
             NEWSBLUR.reader.open_feed(site_id, { router: true, force: true, search: query });
@@ -74,20 +93,16 @@ NEWSBLUR.Router = Backbone.Router.extend({
         NEWSBLUR.reader.open_read_stories(options);
     },
 
-    trending: function () {
-        var options = {
-            router: true
-        };
-        console.log(["trending sites", options]);
-        NEWSBLUR.reader.open_trending_sites(options);
-    },
-
     archive: function () {
         var options = {
             router: true
         };
         console.log(["archive", options]);
         NEWSBLUR.reader.open_archive(options);
+    },
+
+    briefing_admin: function () {
+        NEWSBLUR.reader.open_briefing_admin({ router: true });
     },
 
     briefing: function () {
@@ -129,6 +144,9 @@ NEWSBLUR.Router = Backbone.Router.extend({
             NEWSBLUR.reader.flags.searching = true;
             NEWSBLUR.reader.flags.search = query;
             options['search'] = query;
+        }
+        if (NEWSBLUR.welcome && NEWSBLUR.welcome.is_mobile()) {
+            NEWSBLUR.welcome.activate_mobile_layout();
         }
 
         if (folder_name == "everything") {

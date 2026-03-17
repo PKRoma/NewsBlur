@@ -1,3 +1,10 @@
+"""Elasticsearch integration models for story and feed indexing.
+
+SearchStory manages the Elasticsearch index lifecycle (create, drop, reindex)
+and provides story search by keyword with feed-scoped queries. SearchFeed
+indexes feed metadata for feed discovery search.
+"""
+
 import datetime
 import html
 import re
@@ -173,6 +180,7 @@ class MUserSearch(mongo.Document):
             discover_chunks = [
                 IndexSubscriptionsChunkForDiscover.s(feed_ids=feed_id_chunk, user_id=self.user_id).set(
                     queue="discover_indexer",
+                    soft_time_limit=settings.MAX_SECONDS_COMPLETE_ARCHIVE_FETCH - 60,
                     time_limit=settings.MAX_SECONDS_COMPLETE_ARCHIVE_FETCH,
                 )
                 for feed_id_chunk in feed_id_chunks
@@ -246,8 +254,7 @@ class MUserSearch(mongo.Document):
                 continue
 
             feed.index_stories_for_discover()
-
-        r.publish(user.username, "discover_index_complete:feeds:%s" % ",".join([str(f) for f in feed_ids]))
+            r.publish(user.username, "discover_index_complete:feeds:%s" % feed_id)
 
     @classmethod
     def schedule_index_feeds_for_search(cls, feed_ids, user_id):
@@ -562,6 +569,66 @@ class SearchStory:
             return []
 
         return result_ids
+
+    @classmethod
+    def query_briefing_custom(cls, feed_ids, phrase, date_start, date_end, limit=10):
+        """Search stories by exact phrase within a date range, for briefing custom sections.
+
+        Wraps the phrase in quotes so ES query_string treats it as an exact phrase match
+        across title and content fields. Scoped to feed_ids and the briefing period.
+
+        Returns list of story_hash strings, or empty list on error.
+        """
+        if not feed_ids or not phrase or not phrase.strip():
+            return []
+
+        try:
+            cls.ES().indices.flush(cls.index_name())
+        except elasticsearch.exceptions.NotFoundError:
+            return []
+        except (elasticsearch.exceptions.ConnectionError, urllib3.exceptions.NewConnectionError):
+            return []
+
+        clean_phrase = phrase.strip().replace('"', "")
+        if not clean_phrase:
+            return []
+        quoted_phrase = '"%s"' % clean_phrase
+        quoted_phrase = cls._sanitize_query(quoted_phrase)
+
+        body = {
+            "query": {
+                "bool": {
+                    "must": [
+                        {"query_string": {"query": quoted_phrase, "default_operator": "AND"}},
+                        {"terms": {"feed_id": feed_ids[:2000]}},
+                        {"range": {"date": {"gte": date_start, "lte": date_end}}},
+                    ]
+                }
+            },
+            "sort": [{"date": {"order": "desc"}}],
+            "from": 0,
+            "size": limit,
+        }
+
+        try:
+            results = cls.ES().search(body=body, index=cls.index_name(), doc_type=cls.doc_type())
+        except elasticsearch.exceptions.ConnectionError as e:
+            logging.debug(" ***> ~FRNo search server for briefing custom query: %s" % e)
+            return []
+        except elasticsearch.exceptions.RequestError as e:
+            logging.debug(" ***> ~FRBriefing custom search query error: %s" % e)
+            return []
+
+        logging.debug(
+            " ---> ~FG~SNBriefing custom search for: ~SB%s~SN, ~SB%s~SN results"
+            % (quoted_phrase, len(results["hits"]["hits"]))
+        )
+
+        try:
+            return [r["_id"] for r in results["hits"]["hits"]]
+        except Exception as e:
+            logging.debug(" ---> ~FRBriefing custom search result error: %s" % e)
+            return []
 
     @classmethod
     def global_query(cls, query, order, offset, limit, strip=False):
@@ -1218,12 +1285,6 @@ class SearchFeed:
         - Wildcard matching on link
         - function_score to boost results by subscriber count while preserving relevance
         """
-        try:
-            cls.ES().indices.flush(index=cls.index_name())
-        except elasticsearch.exceptions.NotFoundError as e:
-            logging.debug(f" ***> ~FRNo search server available: {e}")
-            return []
-
         # Escape all Elasticsearch query_string reserved characters
         escaped_text = re.sub(r'([+\-=&|!(){}\[\]^"~*?:\\/])', r"\\\1", text)
 
@@ -1284,8 +1345,11 @@ class SearchFeed:
         }
         try:
             results = cls.ES().search(body=body, index=cls.index_name(), doc_type=cls.doc_type())
-        except elasticsearch.exceptions.ConnectionError as e:
+        except (elasticsearch.exceptions.ConnectionError, elasticsearch.exceptions.ConnectionTimeout) as e:
             logging.error(" ***> ~FRNo search server available for querying: %s" % e)
+            return []
+        except elasticsearch.exceptions.NotFoundError as e:
+            logging.debug(f" ***> ~FRSearch index not found: {e}")
             return []
         except elasticsearch.exceptions.RequestError as e:
             logging.debug(" ***> ~FRSearch query error: %s" % e)
@@ -1299,12 +1363,6 @@ class SearchFeed:
 
     @classmethod
     def vector_query(cls, query_vector, offset=0, max_results=10, feed_ids_to_exclude=None):
-        try:
-            cls.ES().indices.flush(index=cls.index_name())
-        except elasticsearch.exceptions.NotFoundError as e:
-            logging.debug(f" ***> ~FRNo search server available: {e}")
-            return []
-
         must_not_clauses = []
         if feed_ids_to_exclude:
             must_not_clauses.append({"terms": {"feed_id": feed_ids_to_exclude}})
@@ -1329,8 +1387,11 @@ class SearchFeed:
         }
         try:
             results = cls.ES().search(body=body, index=cls.index_name(), doc_type=cls.doc_type())
-        except elasticsearch.exceptions.ConnectionError as e:
+        except (elasticsearch.exceptions.ConnectionError, elasticsearch.exceptions.ConnectionTimeout) as e:
             logging.error(" ***> ~FRNo search server available for querying: %s" % e)
+            return []
+        except elasticsearch.exceptions.NotFoundError as e:
+            logging.debug(f" ***> ~FRSearch index not found: {e}")
             return []
         except elasticsearch.exceptions.RequestError as e:
             logging.debug(" ***> ~FRSearch query error: %s" % e)
@@ -1437,18 +1498,15 @@ class SearchFeed:
     @classmethod
     def fetch_feed_content_vector(cls, feed_id):
         # Fetch the content vector from ES for the specified feed_id
-        try:
-            cls.ES().indices.flush(index=cls.index_name())
-        except (elasticsearch.exceptions.NotFoundError, elasticsearch.exceptions.ConnectionError) as e:
-            logging.debug(f" ***> ~FRNo search server available: {e}")
-            return []
-
         body = {"query": {"term": {"feed_id": feed_id}}}
 
         try:
             results = cls.ES().search(body=body, index=cls.index_name(), doc_type=cls.doc_type())
-        except elasticsearch.exceptions.ConnectionError as e:
+        except (elasticsearch.exceptions.ConnectionError, elasticsearch.exceptions.ConnectionTimeout) as e:
             logging.error(" ***> ~FRNo search server available for querying: %s" % e)
+            return []
+        except elasticsearch.exceptions.NotFoundError as e:
+            logging.debug(f" ***> ~FRSearch index not found: {e}")
             return []
         except elasticsearch.exceptions.RequestError as e:
             logging.debug(" ***> ~FRSearch query error: %s" % e)
@@ -1525,6 +1583,39 @@ class SearchFeed:
         # normalized_embedding = np.array(embedding) / np.linalg.norm(embedding)
 
         return embedding
+
+    @classmethod
+    def generate_content_vector_from_text(cls, text, feature="search_feed_embedding", metadata=None):
+        """Generate a content vector from arbitrary text using OpenAI embeddings.
+        Used for indexing PopularFeed entries that may not have stories yet."""
+        # Clean text
+        text = re.sub(r"http\S+", "", text)
+        text = re.sub(r"[^\w\s]", "", text)
+        text = text.lower()
+        text = " ".join(text.split())
+
+        if not text.strip():
+            return None
+
+        model_name = "text-embedding-3-small"
+        encoding = setup_openai_model(model_name)
+
+        max_tokens = 8191
+        encoded_text = encoding.encode(text)
+        truncated_tokens = encoded_text[:max_tokens]
+        truncated_text = encoding.decode(truncated_tokens)
+
+        client = OpenAI(api_key=settings.OPENAI_API_KEY)
+        response = client.embeddings.create(model=model_name, input=truncated_text)
+
+        LLMCostTracker.record_embedding(
+            model=model_name,
+            input_tokens=response.usage.total_tokens,
+            feature=feature,
+            metadata=metadata or {},
+        )
+
+        return response.data[0].embedding
 
     @classmethod
     def export_csv(cls):

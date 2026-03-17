@@ -45,6 +45,7 @@ _.extend(NEWSBLUR.ReaderFeedException.prototype, {
         this.$modal.bind('click', $.rescope(this.handle_click, this));
         this.$modal.bind('change', $.rescope(this.handle_change, this));
         this.$modal.bind('input', $.rescope(this.handle_input, this));
+        this.setup_mark_unread_slider();
 
         if (this.options.scroll_to_auto_mark_read) {
             _.delay(_.bind(function () {
@@ -94,7 +95,66 @@ _.extend(NEWSBLUR.ReaderFeedException.prototype, {
             $(".NB-modal-title", this.$modal).text("Site Settings");
         }
 
+        this.setup_mute_state();
         this.resize();
+    },
+
+    setup_mute_state: function () {
+        if (!this.feed) return;
+        var self = this;
+        var is_muted = !this.feed.get('active');
+        var mute_expires_at = this.feed.get('mute_expires_at');
+        var $status_text = $('.NB-mute-current-status', this.$modal);
+        var $mute_section = $('.NB-exception-option-mute', this.$modal);
+        var $slider = $('.NB-mute-settings-slider', this.$modal);
+        var stops = NEWSBLUR.utils.MUTE_SLIDER_STOPS;
+
+        $mute_section.removeClass('NB-mute-state-active NB-mute-state-timed NB-mute-state-permanent');
+        if (!is_muted) {
+            $mute_section.addClass('NB-mute-state-active');
+            $status_text.text('This site is active and receiving stories.');
+        } else if (mute_expires_at) {
+            $mute_section.addClass('NB-mute-state-timed');
+            var remaining = NEWSBLUR.utils.mute_time_remaining(mute_expires_at);
+            $status_text.text('Muted \u00b7 unmutes in ' + remaining.replace(' left', ''));
+            // Find closest slider stop to remaining days
+            var days_left = Math.max(1, Math.round((new Date(mute_expires_at) - new Date()) / (1000 * 60 * 60 * 24)));
+            var closest_index = 0;
+            for (var i = 0; i < stops.length; i++) {
+                if (Math.abs(stops[i] - days_left) < Math.abs(stops[closest_index] - days_left)) {
+                    closest_index = i;
+                }
+            }
+            $slider.val(closest_index);
+            var days = stops[closest_index];
+            $('.NB-mute-settings-timed-save', this.$modal).text('Mute for ' + NEWSBLUR.utils.format_mute_days(days));
+        } else {
+            $mute_section.addClass('NB-mute-state-permanent');
+            $status_text.text('Muted indefinitely.');
+        }
+
+        // Bind slider input
+        $slider.off('input.mute').on('input.mute', function () {
+            var index = parseInt($(this).val(), 10);
+            var days = NEWSBLUR.utils.mute_slider_to_days(index);
+            var label = NEWSBLUR.utils.format_mute_days(days);
+            $('.NB-mute-settings-timed-save', self.$modal).text('Mute for ' + label);
+        });
+    },
+
+    animate_mute_saved: function () {
+        var $status = $('.NB-exception-option-mute .NB-mute-status', this.$modal);
+        $status.text('Saved').animate({
+            'opacity': 1
+        }, {
+            'queue': false,
+            'duration': 600,
+            'complete': function () {
+                _.delay(function () {
+                    $status.animate({ 'opacity': 0 }, { 'queue': false, 'duration': 1000 });
+                }, 300);
+            }
+        });
     },
 
     get_feed_settings: function () {
@@ -234,6 +294,52 @@ _.extend(NEWSBLUR.ReaderFeedException.prototype, {
                     ])
                 ])
             ]),
+            $.make('div', { className: 'NB-fieldset NB-exception-option NB-exception-option-mark-unread NB-modal-submit NB-settings-only' }, [
+                $.make('h5', [
+                    'Mark Stories as Unread'
+                ]),
+                $.make('div', { className: 'NB-fieldset-fields' }, [
+                    $.make('div', { className: 'NB-mark-unread-slider-container' }, [
+                        $.make('input', {
+                            type: 'range',
+                            className: 'NB-mark-unread-slider',
+                            min: '1',
+                            max: '365',
+                            value: '14'
+                        }),
+                        $.make('div', { className: 'NB-mark-unread-slider-value' })
+                    ]),
+                    $.make('div', { className: 'NB-mark-unread-premium-notice' }),
+                    $.make('div', { className: 'NB-modal-submit-button NB-modal-submit-green NB-modal-submit-mark-unread' },
+                        this.folder ? 'Mark folder stories as unread' : 'Mark stories as unread')
+                ])
+            ]),
+            (this.feed && !this.feed.is_social() && $.make('div', { className: 'NB-fieldset NB-exception-option NB-exception-option-mute NB-modal-submit NB-settings-only' }, [
+                $.make('h5', [
+                    'Mute',
+                    $.make('div', { className: 'NB-exception-option-status NB-mute-status' })
+                ]),
+                $.make('div', { className: 'NB-fieldset-fields' }, [
+                    $.make('div', { className: 'NB-mute-slider-container' }, [
+                        $.make('div', { className: 'NB-mute-current-status' }),
+                        $.make('input', {
+                            type: 'range',
+                            className: 'NB-mute-settings-slider',
+                            min: '0',
+                            max: '15',
+                            value: '6',
+                            step: '1'
+                        }),
+                        $.make('div', { className: 'NB-mute-buttons NB-mute-buttons-mute' }, [
+                            $.make('div', { className: 'NB-modal-submit-button NB-modal-submit-green NB-mute-settings-timed-save', role: 'button' }, 'Mute for 1 week'),
+                            $.make('div', { className: 'NB-modal-submit-button NB-modal-submit-green NB-mute-settings-forever-save', role: 'button' }, 'Mute indefinitely')
+                        ]),
+                        $.make('div', { className: 'NB-mute-buttons NB-mute-buttons-unmute' }, [
+                            $.make('div', { className: 'NB-modal-submit-button NB-modal-submit-green NB-mute-settings-unmute-save', role: 'button' }, 'Unmute')
+                        ])
+                    ])
+                ])
+            ])),
             $.make('div', { className: 'NB-fieldset NB-exception-option NB-exception-option-retry NB-modal-submit NB-exception-block-only' }, [
                 $.make('h5', [
                     $.make('div', { className: 'NB-exception-option-meta' }),
@@ -553,6 +659,18 @@ _.extend(NEWSBLUR.ReaderFeedException.prototype, {
             }
             self.animate_saved();
         });
+        $.targetIs(e, { tagSelector: '.NB-modal-submit-mark-unread' }, function ($t, $p) {
+            e.preventDefault();
+
+            self.mark_stories_as_unread();
+        });
+        $.targetIs(e, { tagSelector: '.NB-mark-unread-upgrade' }, function ($t, $p) {
+            e.preventDefault();
+
+            self.close(function () {
+                NEWSBLUR.reader.open_premium_upgrade_modal();
+            });
+        });
         $.targetIs(e, { tagSelector: '.NB-modal-submit-retry' }, function ($t, $p) {
             e.preventDefault();
 
@@ -597,6 +715,41 @@ _.extend(NEWSBLUR.ReaderFeedException.prototype, {
         $.targetIs(e, { tagSelector: '.NB-auto-mark-read-option' }, function ($t, $p) {
             e.preventDefault();
             self.handle_auto_mark_read_option_click($t);
+        });
+        $.targetIs(e, { tagSelector: '.NB-mute-settings-timed-save' }, function ($t, $p) {
+            e.preventDefault();
+            var $slider = $('.NB-mute-settings-slider', self.$modal);
+            var index = parseInt($slider.val(), 10);
+            var days = NEWSBLUR.utils.mute_slider_to_days(index);
+            self.model.set_feed_mute(self.feed_id, true, days, function () {
+                self.feed.set('active', false);
+                var expires = new Date();
+                expires.setDate(expires.getDate() + days);
+                self.feed.set('mute_expires_at', expires.toISOString());
+                self.setup_mute_state();
+                self.animate_mute_saved();
+                NEWSBLUR.assets.load_feeds();
+            });
+        });
+        $.targetIs(e, { tagSelector: '.NB-mute-settings-forever-save' }, function ($t, $p) {
+            e.preventDefault();
+            self.model.set_feed_mute(self.feed_id, true, null, function () {
+                self.feed.set('active', false);
+                self.feed.set('mute_expires_at', null);
+                self.setup_mute_state();
+                self.animate_mute_saved();
+                NEWSBLUR.assets.load_feeds();
+            });
+        });
+        $.targetIs(e, { tagSelector: '.NB-mute-settings-unmute-save' }, function ($t, $p) {
+            e.preventDefault();
+            self.model.set_feed_mute(self.feed_id, false, null, function () {
+                self.feed.set('active', true);
+                self.feed.set('mute_expires_at', null);
+                self.setup_mute_state();
+                self.animate_mute_saved();
+                NEWSBLUR.assets.load_feeds();
+            });
         });
         $.targetIs(e, { tagSelector: '.NB-folder-rss-copy' }, function ($t, $p) {
             e.preventDefault();
@@ -683,8 +836,9 @@ _.extend(NEWSBLUR.ReaderFeedException.prototype, {
         // Move folder-specific content into the Settings tab
         var $view_settings = $('.NB-exception-option-view', this.$modal).detach();
         var $auto_mark_read = $('.NB-exception-option-auto-mark-read', this.$modal).detach();
+        var $mark_unread = $('.NB-exception-option-mark-unread', this.$modal).detach();
         var $folder_rss = $('.NB-exception-option-feed', this.$modal).detach();
-        $settings_tab.append($view_settings).append($auto_mark_read).append($folder_rss);
+        $settings_tab.append($view_settings).append($auto_mark_read).append($mark_unread).append($folder_rss);
 
         // Initialize auto-mark-read settings
         this.setup_auto_mark_read_for_folder();
@@ -738,12 +892,14 @@ _.extend(NEWSBLUR.ReaderFeedException.prototype, {
         // Move all feed-specific content into the Settings tab in correct order
         var $view_settings = $('.NB-exception-option-view', this.$modal).detach();
         var $auto_mark_read = $('.NB-exception-option-auto-mark-read', this.$modal).detach();
+        var $mark_unread = $('.NB-exception-option-mark-unread', this.$modal).detach();
+        var $mute_option = $('.NB-exception-option-mute', this.$modal).detach();
         var $retry_option = $('.NB-exception-option-retry', this.$modal).detach();
         var $feed_option = $('.NB-exception-option-feed', this.$modal).detach();
         var $page_option = $('.NB-exception-option-page', this.$modal).detach();
         var $delete_option = $('.NB-exception-option-delete', this.$modal).detach();
-        // Order: view settings, auto-mark-read, then Option 1 (retry), Option 2 (feed), Option 3 (page), Option 4 (delete)
-        $settings_tab.append($view_settings).append($auto_mark_read).append($retry_option).append($feed_option).append($page_option).append($delete_option);
+        // Order: view settings, auto-mark-read, mark unread, mute, then Option 1 (retry), Option 2 (feed), Option 3 (page), Option 4 (delete)
+        $settings_tab.append($view_settings).append($auto_mark_read).append($mark_unread).append($mute_option).append($retry_option).append($feed_option).append($page_option).append($delete_option);
 
         // Initialize auto-mark-read settings for feed
         this.setup_auto_mark_read_for_feed();
@@ -770,15 +926,19 @@ _.extend(NEWSBLUR.ReaderFeedException.prototype, {
             this.update_icon_grid_colors(this.selected_icon_color);
         }
 
-        // Show/hide header clear link based on whether there's an icon
+        // Show reset banner immediately (no animation) if there's already a custom icon
         var has_icon = !!(this.feed_icon && this.feed_icon.icon_type && this.feed_icon.icon_type !== 'none');
-        $('.NB-folder-icon-clear-header', this.$modal).toggle(has_icon);
+        if (has_icon) {
+            var $wrapper = $('.NB-feed-icon-reset-wrapper', this.$modal);
+            $wrapper.css({ height: '', overflow: '', opacity: 1 });
+            $wrapper.data('banner-visible', true);
+        }
 
-        // Update header clear link text for feeds
-        $('.NB-folder-icon-clear-header', this.$modal).text('Reset to favicon');
+        // Hide the header clear link for feeds (banner replaces it)
+        $('.NB-folder-icon-clear-header', this.$modal).hide();
 
-        // Add click handler for header clear link
-        $('.NB-folder-icon-clear-header', this.$modal).on('click', function (e) {
+        // Add click handler for reset banner
+        $('.NB-feed-icon-reset-banner', this.$modal).on('click', function (e) {
             e.preventDefault();
             self.clear_feed_icon();
         });
@@ -788,11 +948,29 @@ _.extend(NEWSBLUR.ReaderFeedException.prototype, {
     },
 
     make_feed_icon_tab: function () {
-        // Use shared icon picker component
-        return NEWSBLUR.IconPicker.make_icon_editor({
+        // Get the original favicon, bypassing custom icon
+        var favicon_data = this.feed.get('favicon');
+        var favicon_url;
+        if (favicon_data && favicon_data.length) {
+            favicon_url = favicon_data.indexOf('data:image') === 0 ? favicon_data : 'data:image/png;base64,' + favicon_data;
+        } else {
+            favicon_url = NEWSBLUR.URLs.favicon.replace('{id}', this.feed_id);
+        }
+        var $banner = $.make('div', { className: 'NB-feed-icon-reset-wrapper', style: 'height: 0; overflow: hidden; opacity: 0' }, [
+            $.make('div', { className: 'NB-feed-icon-reset-banner' }, [
+                $.make('img', { className: 'NB-feed-icon-reset-favicon', src: favicon_url }),
+                $.make('div', { className: 'NB-feed-icon-reset-text' }, 'Reset to original favicon'),
+                $.make('div', { className: 'NB-feed-icon-reset-action' }, 'Reset')
+            ])
+        ]);
+        var $editor = NEWSBLUR.IconPicker.make_icon_editor({
             include_upload: true,
             include_reset: false
         });
+        return $.make('div', [
+            $banner,
+            $editor
+        ]);
     },
 
     select_current_icon: function () {
@@ -978,9 +1156,17 @@ _.extend(NEWSBLUR.ReaderFeedException.prototype, {
             }
         }
 
-        // Show/hide the clear link based on whether there's a custom icon
+        // Show/hide the reset banner (feeds) or header clear link (folders)
         var has_custom_icon = !!(icon && icon.icon_type && icon.icon_type !== 'none');
-        $('.NB-folder-icon-clear-header', this.$modal).toggle(has_custom_icon);
+        if (this.feed) {
+            if (has_custom_icon) {
+                this.animate_reset_banner_in();
+            } else {
+                this.animate_reset_banner_out();
+            }
+        } else {
+            $('.NB-folder-icon-clear-header', this.$modal).toggle(has_custom_icon);
+        }
     },
 
     save_and_refresh_icon: function () {
@@ -997,6 +1183,7 @@ _.extend(NEWSBLUR.ReaderFeedException.prototype, {
                 function () {
                     self.refresh_folder_icon_everywhere();
                     $('.NB-folder-icon-clear-header', self.$modal).show();
+                    self.resize();
                 }
             );
         } else if (this.feed) {
@@ -1009,7 +1196,7 @@ _.extend(NEWSBLUR.ReaderFeedException.prototype, {
                 this.feed_icon.icon_set,
                 function () {
                     self.refresh_feed_icon_everywhere();
-                    $('.NB-folder-icon-clear-header', self.$modal).show();
+                    self.resize();
                 }
             );
         }
@@ -1083,8 +1270,8 @@ _.extend(NEWSBLUR.ReaderFeedException.prototype, {
 
             // Trigger feed view update if this is the active feed
             if (NEWSBLUR.reader.active_feed && NEWSBLUR.reader.active_feed == this.feed_id) {
-                // Update feedbar favicon
-                var $feedbar_icon = $('.NB-feedbar .feed_favicon').first();
+                // Update feedbar favicon (direct child selector avoids matching discover feed favicons)
+                var $feedbar_icon = $('.NB-feedbar .feed[data-id="' + this.feed_id + '"] > .feed_favicon').first();
                 var $icon = make_icon();
                 if ($icon && $feedbar_icon.length) {
                     $feedbar_icon.replaceWith($icon);
@@ -1099,14 +1286,13 @@ _.extend(NEWSBLUR.ReaderFeedException.prototype, {
         var $button = $('.NB-folder-icon-upload-button', this.$modal);
         var $loading = $('.NB-folder-icon-upload-button .NB-loading', this.$modal);
         var $error = $('.NB-folder-icon-upload-error', this.$modal);
-        var $preview = $('.NB-folder-icon-upload-preview', this.$modal);
         var file = $file_input[0].files[0];
 
         if (!file) return;
 
         // Validate file type
-        if (!file.type.match(/^image\/(png|jpeg|gif|webp)$/)) {
-            $error.text('Please select a valid image file (PNG, JPG, GIF)').show();
+        if (!file.type.match(/^image\/(png|jpeg|gif|webp|svg\+xml)$/)) {
+            $error.text('Please select a valid image file (PNG, JPG, GIF, SVG, or WebP)').show();
             return;
         }
 
@@ -1120,6 +1306,49 @@ _.extend(NEWSBLUR.ReaderFeedException.prototype, {
         $error.hide();
         $button.addClass('NB-uploading');
         $loading.addClass('NB-active');
+
+        if (file.type === 'image/svg+xml') {
+            // Rasterize SVG to PNG via Canvas before uploading
+            var reader = new FileReader();
+            reader.onload = function (e) {
+                var img = new Image();
+                img.onload = function () {
+                    var canvas = document.createElement('canvas');
+                    canvas.width = 128;
+                    canvas.height = 128;
+                    var ctx = canvas.getContext('2d');
+                    var scale = Math.min(128 / img.width, 128 / img.height);
+                    var w = img.width * scale;
+                    var h = img.height * scale;
+                    var x = (128 - w) / 2;
+                    var y = (128 - h) / 2;
+                    ctx.drawImage(img, x, y, w, h);
+                    canvas.toBlob(function (blob) {
+                        self.upload_icon_file(new File([blob], 'icon.png', { type: 'image/png' }));
+                    }, 'image/png');
+                };
+                img.onerror = function () {
+                    $button.removeClass('NB-uploading');
+                    $loading.removeClass('NB-active');
+                    $error.text('Failed to load SVG image').show();
+                };
+                img.src = e.target.result;
+            };
+            reader.readAsDataURL(file);
+        } else {
+            this.upload_icon_file(file);
+        }
+
+        // Reset file input so same file can be re-selected
+        $file_input.val('');
+    },
+
+    upload_icon_file: function (file) {
+        var self = this;
+        var $button = $('.NB-folder-icon-upload-button', this.$modal);
+        var $loading = $('.NB-folder-icon-upload-button .NB-loading', this.$modal);
+        var $error = $('.NB-folder-icon-upload-error', this.$modal);
+        var $preview = $('.NB-folder-icon-upload-preview', this.$modal);
 
         var formData = new FormData();
         var upload_url;
@@ -1176,8 +1405,9 @@ _.extend(NEWSBLUR.ReaderFeedException.prototype, {
                     self.update_header_icon();
                     $('.NB-folder-icon-preset', self.$modal).removeClass('NB-active');
                     $('.NB-folder-icon-emoji-option', self.$modal).removeClass('NB-active');
-                    // Show clear link in header
-                    $('.NB-folder-icon-clear-header', self.$modal).show();
+                    // Show reset banner
+                    self.animate_reset_banner_in();
+                    self.resize();
                 } else {
                     $error.text(response.message || 'Upload failed. Please try again.').show();
                 }
@@ -1188,9 +1418,6 @@ _.extend(NEWSBLUR.ReaderFeedException.prototype, {
                 $error.text('Upload failed. Please check your connection and try again.').show();
             }
         });
-
-        // Reset file input so same file can be re-selected
-        $file_input.val('');
     },
 
     clear_folder_icon: function () {
@@ -1214,6 +1441,7 @@ _.extend(NEWSBLUR.ReaderFeedException.prototype, {
             $('.NB-folder-icon-clear-header', self.$modal).hide();
             // Clear upload preview
             $('.NB-folder-icon-upload-preview', self.$modal).empty().removeClass('NB-active');
+            self.resize();
         });
     },
 
@@ -1224,20 +1452,63 @@ _.extend(NEWSBLUR.ReaderFeedException.prototype, {
         this.selected_icon_color = '#000000';
         this.feed_icon = { icon_type: 'none' };
 
+        // Optimistic UI update — clear local cache and refresh icons immediately
+        delete NEWSBLUR.assets.feed_icons[this.feed_id];
+        this.animate_reset_banner_out();
+        this.update_header_icon();
+        this.refresh_feed_icon_everywhere();
+        $('.NB-folder-icon-preset', this.$modal).removeClass('NB-active');
+        $('.NB-folder-icon-emoji-option', this.$modal).removeClass('NB-active');
+        $('.NB-folder-icon-color', this.$modal).removeClass('NB-active');
+        $('.NB-folder-icon-color[data-color="#000000"]', this.$modal).addClass('NB-active');
+        this.update_icon_grid_colors(this.selected_icon_color);
+        $('.NB-folder-icon-clear', this.$modal).hide();
+        $('.NB-folder-icon-clear-header', this.$modal).hide();
+        $('.NB-folder-icon-upload-preview', this.$modal).empty().removeClass('NB-active');
+
         NEWSBLUR.assets.remove_feed_icon(this.feed_id, function () {
-            self.update_header_icon();
-            self.refresh_feed_icon_everywhere();
-            $('.NB-folder-icon-preset', self.$modal).removeClass('NB-active');
-            $('.NB-folder-icon-emoji-option', self.$modal).removeClass('NB-active');
-            $('.NB-folder-icon-color', self.$modal).removeClass('NB-active');
-            // Select default black color
-            $('.NB-folder-icon-color[data-color="#000000"]', self.$modal).addClass('NB-active');
-            self.update_icon_grid_colors(self.selected_icon_color);
-            // Hide the clear links
-            $('.NB-folder-icon-clear', self.$modal).hide();
-            $('.NB-folder-icon-clear-header', self.$modal).hide();
-            // Clear upload preview
-            $('.NB-folder-icon-upload-preview', self.$modal).empty().removeClass('NB-active');
+            self.resize();
+        });
+    },
+
+    animate_reset_banner_in: function () {
+        var self = this;
+        var $wrapper = $('.NB-feed-icon-reset-wrapper', this.$modal);
+        if (!$wrapper.length) return;
+
+        // Already visible — don't re-animate
+        if ($wrapper.data('banner-visible')) return;
+        $wrapper.data('banner-visible', true);
+
+        // Defer until after icon redraws
+        requestAnimationFrame(function () {
+            var $banner = $wrapper.find('.NB-feed-icon-reset-banner');
+            $wrapper.stop(true).css({ height: 0, overflow: 'hidden', opacity: 0 });
+            var target_height = $banner.outerHeight(true);
+            $wrapper.animate({ height: target_height, opacity: 1 }, {
+                duration: 350,
+                easing: 'easeInOutQuint',
+                complete: function () {
+                    $wrapper.css({ height: '', overflow: '' });
+                    self.resize();
+                }
+            });
+        });
+    },
+
+    animate_reset_banner_out: function () {
+        var self = this;
+        var $wrapper = $('.NB-feed-icon-reset-wrapper', this.$modal);
+        if (!$wrapper.length || !$wrapper.data('banner-visible')) return;
+        $wrapper.data('banner-visible', false);
+
+        $wrapper.stop(true).css({ overflow: 'hidden' });
+        $wrapper.animate({ height: 0, opacity: 0 }, {
+            duration: 250,
+            easing: 'easeInOutQuint',
+            complete: function () {
+                self.resize();
+            }
         });
     },
 
@@ -1592,6 +1863,103 @@ _.extend(NEWSBLUR.ReaderFeedException.prototype, {
                 }, 300);
             }
         });
+    },
+
+    // ========================
+    // = Mark Stories as Unread =
+    // ========================
+
+    get_max_unread_days: function () {
+        if (NEWSBLUR.Globals.is_archive) return 365;
+        if (NEWSBLUR.Globals.is_premium) return NEWSBLUR.Globals.default_days_of_unread;
+        return NEWSBLUR.Globals.default_days_of_unread_free;
+    },
+
+    setup_mark_unread_slider: function () {
+        var self = this;
+        var $slider = $('.NB-mark-unread-slider', this.$modal);
+        var max_days = this.get_max_unread_days();
+
+        $slider.val(Math.min(14, max_days));
+        this.update_mark_unread_slider($slider.val());
+
+        $slider.on('input', function () {
+            self.update_mark_unread_slider(parseInt($(this).val(), 10));
+        });
+    },
+
+    update_mark_unread_slider: function (value) {
+        var $slider = $('.NB-mark-unread-slider', this.$modal);
+        var $slider_value = $('.NB-mark-unread-slider-value', this.$modal);
+        var $notice = $('.NB-mark-unread-premium-notice', this.$modal);
+        var $button = $('.NB-modal-submit-mark-unread', this.$modal);
+        var max_days = this.get_max_unread_days();
+        var min = parseInt($slider.attr('min'), 10) || 1;
+        var max = parseInt($slider.attr('max'), 10) || 365;
+        var percent = ((value - min) / (max - min)) * 100;
+        var limit_percent = ((max_days - min) / (max - min)) * 100;
+
+        if (value > max_days) {
+            $slider.css('background', 'linear-gradient(to right, #4a90d9 0%, #4a90d9 ' + limit_percent + '%, #f5a623 ' + limit_percent + '%, #f5a623 ' + percent + '%, #e0e0e0 ' + percent + '%, #e0e0e0 100%)');
+            $slider_value.html('<b>' + value + ' day' + (value !== 1 ? 's' : '') + '</b> &mdash; exceeds your plan limit of ' + max_days + ' days');
+            $button.hide();
+            if (NEWSBLUR.Globals.is_premium) {
+                $notice.html('').append(
+                    $.make('a', { href: '#', className: 'NB-premium-link NB-mark-unread-upgrade' }, [
+                        $.make('span', { className: 'NB-archive-badge' }, 'Upgrade to Premium Archive'),
+                        ' for up to 365 days'
+                    ])
+                ).show();
+            } else {
+                $notice.html('').append(
+                    $.make('a', { href: '#', className: 'NB-premium-link NB-mark-unread-upgrade' }, [
+                        $.make('span', { className: 'NB-premium-badge' }, 'Upgrade to Premium'),
+                        ' for up to ' + NEWSBLUR.Globals.default_days_of_unread + ' days'
+                    ])
+                ).show();
+            }
+        } else {
+            $slider.css('background', 'linear-gradient(to right, #4a90d9 0%, #4a90d9 ' + percent + '%, #e0e0e0 ' + percent + '%, #e0e0e0 100%)');
+            $slider_value.html('Mark stories from the last <b>' + value + ' day' + (value !== 1 ? 's' : '') + '</b> as unread');
+            $notice.hide();
+            $button.show();
+        }
+    },
+
+    mark_stories_as_unread: function () {
+        var self = this;
+        var $button = $('.NB-modal-submit-mark-unread', this.$modal);
+        var $slider = $('.NB-mark-unread-slider', this.$modal);
+        var days = parseInt($slider.val(), 10);
+        var max_days = this.get_max_unread_days();
+        var feed_id = this.feed ? this.feed.id : null;
+        var folder = this.folder ? this.folder_title : null;
+
+        if (days > max_days) return;
+
+        $button.text('Marking as unread...').addClass('NB-disabled').attr('disabled', true);
+
+        NEWSBLUR.assets.mark_stories_as_unread(days, feed_id, folder, _.bind(function (data) {
+            if (data.code === -1) {
+                $button.text(data.message).removeClass('NB-disabled').removeAttr('disabled');
+                return;
+            }
+            $.modal.close();
+            if (data.async) {
+                // Celery task dispatched (folder case). Show progress bar and wait for pubsub.
+                NEWSBLUR.reader.flags['pause_feed_refreshing'] = true;
+                NEWSBLUR.reader.flags['waiting_for_mark_unread'] = true;
+                NEWSBLUR.reader.start_count_unreads_after_import();
+            } else {
+                // Synchronous (single feed). Refresh immediately.
+                NEWSBLUR.reader.force_feeds_refresh(function () {
+                    NEWSBLUR.reader.finish_count_unreads_after_import();
+                }, true);
+                NEWSBLUR.reader.start_count_unreads_after_import();
+            }
+        }, this), _.bind(function () {
+            $button.text('Error. Try again.').removeClass('NB-disabled').removeAttr('disabled');
+        }, this));
     }
 
 });

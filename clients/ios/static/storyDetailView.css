@@ -135,6 +135,40 @@
     font-size: 11px;
 }
 
+.NB-mac .NB-button.NB-share-button div {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 6px 8px;
+}
+
+.NB-mac .NB-button.NB-share-button .NB-icon {
+    margin: 0;
+}
+
+.NB-mac .NB-button.NB-train-button .NB-icon {
+    top: 0;
+}
+.NB-mac .NB-button.NB-share-share-button .NB-icon {
+    top: 1px;
+}
+.NB-mac .NB-button.NB-save-button .NB-icon {
+    top: 0;
+}
+.NB-mac .NB-button.NB-ask-ai-button .NB-icon {
+    top: -1px;
+}
+
+.NB-mac .NB-button.NB-share-button .NB-sideoption-text {
+    position: relative;
+    top: -1px;
+}
+
+.NB-mac .NB-share-wrapper {
+    margin-bottom: 60px;
+}
+
 /**
  * iPad Wide Style
  */
@@ -294,6 +328,7 @@
 body {
     text-rendering: optimizeLegibility;
     margin: 0;
+    overflow-x: hidden;
     -webkit-text-size-adjust: 100%; /* Prevent font scaling in landscape while allowing user zoom */
     font-size: 14px;
     line-height: 120%;
@@ -302,6 +337,12 @@ body {
 
 body.NB-iphone {
     line-height: 110%;
+}
+
+#story_pane {
+    padding-bottom: 64px;
+    padding-bottom: calc(64px + env(safe-area-inset-bottom));
+    padding-bottom: calc(64px + constant(safe-area-inset-bottom));
 }
 
 /** {*/
@@ -385,6 +426,59 @@ body.NB-iphone {
     white-space: nowrap;
 }
 
+/* URL Match Display */
+.NB-story-url-match {
+    margin: 5px 0 6px;
+    padding-left: 12px;
+    display: flex;
+    align-items: center;
+}
+
+.NB-story-url {
+    display: inline-block;
+    font-weight: normal;
+    font-size: 11px;
+    font-style: italic;
+    font-family: Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+    border-radius: 4px;
+    padding: 2px 6px;
+    line-height: 14px;
+    background-color: rgba(0, 0, 0, .05);
+    color: #808080;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.NB-story-url .NB-story-url-label {
+    font-style: normal;
+    font-weight: 500;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+
+.NB-story-url.NB-score-1 {
+    background-color: rgba(163, 202, 135, 0.3);
+    color: #557a40;
+}
+
+.NB-story-url.NB-score-1 .NB-story-url-matched {
+    color: #34912E;
+    font-weight: bold;
+    font-style: normal;
+}
+
+.NB-story-url.NB-score--1 {
+    background-color: rgba(213, 133, 134, 0.3);
+    color: #8a5556;
+}
+
+.NB-story-url.NB-score--1 .NB-story-url-matched {
+    color: #A90103;
+    font-weight: bold;
+    font-style: normal;
+}
+
 .NB-middot {
     display: inline-block;
     color: #A0A0A0;
@@ -457,6 +551,18 @@ body.NB-iphone {
     opacity: .25;
     border-radius: 4px;
     display: none;
+}
+
+#NB-story .NB-classifier-highlight-positive {
+    background-color: #d6f0d5;
+    padding: 2px 5px;
+    border-radius: 3px;
+}
+
+#NB-story .NB-classifier-highlight-negative {
+    background-color: #FFCCCC;
+    padding: 2px 5px;
+    border-radius: 3px;
 }
 .NB-story-tag.pressed .NB-highlight,
 .NB-user-tag.pressed .NB-highlight,
@@ -888,7 +994,7 @@ a.NB-show-profile {
     flex-direction: row;
     justify-content: space-between;
     align-items: center;
-    gap: 8px;
+    gap: 6px;
 }
 
 .NB-button.NB-share-button {
@@ -912,15 +1018,29 @@ a.NB-show-profile {
     margin: 0;
 }
 
+.NB-button.NB-read-button {
+    margin: 0;
+    width: 100%;
+}
+
 .NB-button a {
     display: inline-block;
     padding-top: 1px;
     line-height: 16px;
-    font-family: Helvetica, sans-serif;
+    font-family: -apple-system, "SF Pro Text", "Helvetica Neue", Helvetica, sans-serif;
     font-size: 9px;
     font-weight: bold;
     color: rgba(255, 255, 255, .8);
     text-shadow: 0px 1px 0px rgba(0, 0, 0, .1);
+}
+
+.NB-button.NB-share-button a {
+    display: block;
+    padding: 0;
+    line-height: normal;
+    text-decoration: none;
+    color: inherit;
+    text-shadow: none;
 }
 
 .NB-button.active a,
@@ -943,12 +1063,14 @@ a.NB-show-profile {
 }
 .NB-button.NB-share-button div {
     height: auto;
-    background: transparent;
-    color: rgba(0, 0, 0, 0.25);
-    text-shadow: 0 1px 0 rgba(255, 255, 255, .5);
-    border: 0px;
-    border-radius: 4px;
+    background: rgba(0, 0, 0, 0.04);
+    color: rgba(0, 0, 0, 0.4);
+    text-shadow: none;
+    border: 0.5px solid rgba(0, 0, 0, 0.1);
+    border-radius: 6px;
     line-height: 18px;
+    display: flex;
+    align-items: center;
 }
 .NB-button:active div,
 .NB-button.NB-button-active div {
@@ -967,8 +1089,9 @@ a.NB-show-profile {
 
 .NB-button.NB-share-button:active div,
 .NB-button.NB-share-button.NB-button-active div {
-    color: darkgrey;
-    text-shadow: 0 1px 0 rgba(0, 0, 0, .2);
+    color: rgba(0, 0, 0, 0.5);
+    background: rgba(0, 0, 0, 0.08);
+    text-shadow: none;
 }
 .NB-iphone .NB-button div {
     padding: 0px 5px 0px;
@@ -978,28 +1101,28 @@ a.NB-show-profile {
     padding-bottom: 0px;
 }
 
-.NB-button.NB-share-button div { 
-    padding: 8px 0px 8px;
-    border-radius: 2px;
+.NB-button.NB-share-button div {
+    padding: 6px 0px;
+    border-radius: 6px;
     text-align: center;
 }
 
 .NB-button.NB-share-button .NB-icon {
-    background: url("share@2x.png") no-repeat 0 0;
-    background-size: 16px;
-    width: 25px;
-    display: inline-block;
-    height: 18px;
-    margin: 0 2px 0 12px;
-    vertical-align: middle;
-    opacity: .7;
+    background: url("share@2x.png") no-repeat center center;
+    background-size: 12px;
+    width: 14px;
+    display: block;
+    height: 14px;
+    flex-shrink: 0;
+    margin-right: 8px;
+    opacity: .5;
 }
 
 .NB-button.NB-train-button .NB-icon {
-    background: url("train@2x.png") no-repeat 0 0;
-    background-size: 16px;
+    background: url("train@2x.png") no-repeat center center;
+    background-size: 12px;
     position: relative;
-    top: -3px;
+    top: -1px;
 }
 
 .NB-button.NB-share-share-button .NB-icon {
@@ -1008,25 +1131,35 @@ a.NB-show-profile {
 }
 
 .NB-button.NB-save-button .NB-icon {
-    background: url("saved-stories@2x.png") no-repeat 0 0;
-    background-size: 16px;
-    position: relative;
-    top: -1px;
+    background: url("saved-stories@2x.png") no-repeat center center;
+    background-size: 12px;
 }
 
 .NB-button.NB-ask-ai-button .NB-icon {
     background: url("prompt.svg") no-repeat center center;
-    background-size: 20px 20px;
+    background-size: 14px 14px;
+    position: relative;
+    top: -1px;
 }
 
 .NB-button.NB-share-button .NB-sideoption-text {
-    vertical-align: middle;
+    font-family: -apple-system, "SF Pro Text", "Helvetica Neue", Helvetica, sans-serif;
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.01em;
+    flex: 1;
+    text-align: center;
+}
+
+.NB-button.NB-read-button .NB-icon {
+    background: url("markread@2x.png") no-repeat 0 0;
+    background-size: 16px;
 }
 
 .NB-iphone .NB-button.NB-share-button .NB-icon {
-    background-position-y: bottom;
-    width: 20px;
-    margin-left: -2px;
+    background-position: center center;
+    width: 14px;
+    right: 6px;
 }
 
 .NB-iphone .NB-button .NB-story-comment-like-button-wrapper,
@@ -1406,5 +1539,3 @@ a.NB-show-profile {
     left: 0;
     background-size: 25px 50px;
 }
-
-

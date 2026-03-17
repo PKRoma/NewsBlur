@@ -132,7 +132,8 @@ worktree-close:
 			docker run --rm -v "$$WORKTREE_PATH:/workdir" alpine rm -rf /workdir/node /workdir/docker 2>/dev/null || rm -rf node docker 2>/dev/null || true; \
 			cd "$$MAIN_REPO"; \
 			echo "Removing worktree: $$WORKTREE_PATH"; \
-			git worktree remove "$$WORKTREE_PATH" --force; \
+			git worktree remove "$$WORKTREE_PATH" --force 2>/dev/null || \
+				(rm -rf "$$WORKTREE_PATH" && git worktree prune); \
 			echo "✓ Removed worktree. You are now in: $$MAIN_REPO"; \
 		else \
 			echo "⚠ Worktree has uncommitted changes. Commit or stash changes before closing."; \
@@ -237,6 +238,8 @@ logmongo:
 alllogs: 
 	docker compose logs -f --tail 20
 logall: alllogs
+tlnb-samuel:
+	/srv/newsblur/utils/tlnb.py | awk '{line=$$0; gsub(/\033\[[0-9;]*m/,""); if (/\[samuel\^]/) print line}'
 mongo:
 	docker exec -it newsblur_db_mongo mongo --port 29019
 mongo-repair:
@@ -264,9 +267,11 @@ down:
 stop: down
 nbdown: down
 jekyll:
+	-pkill -f "jekyll serve" 2>/dev/null; sleep 0.5
 	cd blog && JEKYLL_ENV=production bundle exec jekyll serve --config _config.yml
 jekyll_drafts:
-	cd blog && JEKYLL_ENV=production bundle exec jekyll serve --drafts --config _config.yml
+	-pkill -f "jekyll serve" 2>/dev/null; sleep 0.5
+	cd blog && JEKYLL_ENV=production bundle exec jekyll serve --drafts --incremental --config _config.yml
 lint:
 	docker exec -t newsblur_web isort --profile black --skip-glob '*.worktree/*' --skip-glob '*/archive/*' --skip-glob '.claude/*' .
 	docker exec -t newsblur_web black --line-length 110 --exclude '\.worktree/.*|.*/archive/.*|\.claude/.*' .
@@ -436,6 +441,10 @@ test_haproxy:
 	./utils/test_haproxy_toggle.sh
 test_haproxy_staging:
 	./utils/test_haproxy_toggle.sh --staging
+celery_restart:
+	ansible-playbook ansible/deploy.yml -l task --tags restart
+work_restart:
+	ansible-playbook ansible/deploy.yml -l work --tags restart
 celery_stop:
 	ansible-playbook ansible/deploy.yml -l task --tags stop
 deploy_sentry:
@@ -511,3 +520,64 @@ api:
 
 grafana-dashboards:
 	uv run python utils/grafana_backup.py
+
+# Off-site backup to Home Assistant box
+# Hardware: Intel Celeron N5105, 3.6GB RAM, HAOS (Alpine-based)
+# SSH: key-based auth via Advanced SSH & Web Terminal add-on (protection mode off)
+# Backup drive: WD 12TB at /media/newsblur-backup (ext4, label=newsblur-backup)
+#   UUID: ef981d62-7a0b-4858-9ee9-38db68f1e46f, mounted on-demand (not at boot — prevents 24/7 spinning)
+# Scripts/keys persist in /config/scripts/ (/root/.ssh/ is ephemeral, don't use it)
+# Python venv at /config/scripts/venv (boto3 for S3 downloads)
+# Cron job in SSH add-on: nightly 6am, mounts drive, runs backup, unmounts+deauthorizes USB
+# Installed by /config/scripts/setup_cron.sh (runs on add-on startup via init_commands)
+# HAOS gotchas:
+#   - SSH add-on runs in a container, not on the host
+#   - For host-level ops (mount, fdisk): docker run --rm --privileged --pid=host alpine nsenter -t 1 -m -- <cmd>
+#   - No scp/sftp subsystem (Dropbear), use: cat file | ssh host "cat > path"
+#   - No pip (externally-managed), use venv
+#   - "ha os datadisk move" moves the HA data partition -- do NOT use for backup drives
+# Troubleshooting:
+#   ssh root@192.168.1.27 "tail -50 /media/newsblur-backup/backup.log"
+#   ssh root@192.168.1.27 "du -sh /media/newsblur-backup/*"
+#   ssh root@192.168.1.27 "df -h /media/newsblur-backup"
+HA_HOST := root@192.168.1.27
+HA_SCRIPTS := /config/scripts
+
+offsite-backup-install:
+	@$(call log,~FB---> Installing off-site backup on HA box~ST)
+	ssh $(HA_HOST) "mkdir -p $(HA_SCRIPTS)"
+	cat utils/backups/offsite_pull.sh | ssh $(HA_HOST) "cat > $(HA_SCRIPTS)/offsite_pull.sh"
+	ssh $(HA_HOST) "chmod +x $(HA_SCRIPTS)/offsite_pull.sh"
+	cat utils/backups/offsite_status.py | ssh $(HA_HOST) "cat > $(HA_SCRIPTS)/offsite_status.py"
+	cat utils/backups/offsite_verify.py | ssh $(HA_HOST) "cat > $(HA_SCRIPTS)/offsite_verify.py"
+	cat utils/backups/mount_backup_drive.sh | ssh $(HA_HOST) "cat > $(HA_SCRIPTS)/mount_backup_drive.sh"
+	ssh $(HA_HOST) "chmod +x $(HA_SCRIPTS)/mount_backup_drive.sh"
+	cat utils/backups/unmount_backup_drive.sh | ssh $(HA_HOST) "cat > $(HA_SCRIPTS)/unmount_backup_drive.sh"
+	ssh $(HA_HOST) "chmod +x $(HA_SCRIPTS)/unmount_backup_drive.sh"
+	cat utils/backups/setup_cron.sh | ssh $(HA_HOST) "cat > $(HA_SCRIPTS)/setup_cron.sh"
+	ssh $(HA_HOST) "chmod +x $(HA_SCRIPTS)/setup_cron.sh"
+	cat /srv/secrets-newsblur/keys/docker.key | ssh $(HA_HOST) "cat > $(HA_SCRIPTS)/docker.key"
+	ssh $(HA_HOST) "chmod 600 $(HA_SCRIPTS)/docker.key"
+	@awk -F= '/aws_access_key_id/{print $$2}' /srv/secrets-newsblur/keys/aws.s3.token | ssh $(HA_HOST) "cat > $(HA_SCRIPTS)/aws_s3_credentials"
+	@awk -F= '/aws_secret_access_key/{print $$2}' /srv/secrets-newsblur/keys/aws.s3.token | ssh $(HA_HOST) "cat >> $(HA_SCRIPTS)/aws_s3_credentials"
+	ssh $(HA_HOST) "chmod 600 $(HA_SCRIPTS)/aws_s3_credentials"
+	@sed -n 's/^MAILGUN_ACCESS_KEY = "\(.*\)"/\1/p' /srv/secrets-newsblur/settings/common_settings.py | ssh $(HA_HOST) "cat > $(HA_SCRIPTS)/mailgun_credentials"
+	@sed -n 's/^MAILGUN_SERVER_NAME = "\(.*\)"/\1/p' /srv/secrets-newsblur/settings/common_settings.py | ssh $(HA_HOST) "cat >> $(HA_SCRIPTS)/mailgun_credentials"
+	ssh $(HA_HOST) "chmod 600 $(HA_SCRIPTS)/mailgun_credentials"
+	@$(call log,~FB---> Setting up Python venv with boto3 on HA box~ST)
+	ssh $(HA_HOST) "python3 -m venv $(HA_SCRIPTS)/venv && $(HA_SCRIPTS)/venv/bin/pip install boto3 requests"
+	@$(call log,~FB---> Installing cron job~ST)
+	ssh $(HA_HOST) "$(HA_SCRIPTS)/setup_cron.sh"
+	@$(call log,~FG---> Off-site backup installed. Cron runs nightly at 6am.~ST)
+
+offsite-backup:
+	@$(call log,~FB---> Running off-site backup pull~ST)
+	ssh $(HA_HOST) "$(HA_SCRIPTS)/offsite_pull.sh"
+
+offsite-backup-status:
+	@ssh $(HA_HOST) "$(HA_SCRIPTS)/mount_backup_drive.sh > /dev/null && (echo '=== Backup log ==='; tail -15 /media/newsblur-backup/backup.log 2>/dev/null; echo; echo '=== Mongo stream ==='; tail -5 /media/newsblur-backup/backup_run.log 2>/dev/null; echo; /config/scripts/venv/bin/python3 /config/scripts/offsite_status.py); $(HA_SCRIPTS)/unmount_backup_drive.sh > /dev/null"
+
+offsite-backup-uninstall:
+	@$(call log,~FY---> Removing off-site backup from HA box~ST)
+	ssh $(HA_HOST) "rm -f $(HA_SCRIPTS)/offsite_pull.sh $(HA_SCRIPTS)/docker.key"
+	@$(call log,~FG---> Removed. Don't forget to remove shell_command + automation from HA config.~ST)

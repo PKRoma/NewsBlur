@@ -2,6 +2,7 @@ import datetime
 import re
 import time
 import zlib
+from collections import defaultdict
 
 import redis
 from django.conf import settings
@@ -14,9 +15,17 @@ from apps.analyzer.models import (
     MClassifierTitle,
     compute_story_score,
 )
+from apps.briefing.models import DEFAULT_SECTION_ORDER, DEFAULT_SECTIONS
 from apps.reader.models import UserSubscription
 from apps.rss_feeds.models import MStory
 from utils import log as logging
+
+CLASSIFIER_WEIGHTS = {
+    "title": 0.10,  # Title keyword matches — highest value
+    "author": 0.08,  # Author matches
+    "tag": 0.06,  # Tag/category matches
+    "feed": 0.03,  # Site/publisher matches — lowest value
+}
 
 
 def select_briefing_stories(
@@ -29,6 +38,8 @@ def select_briefing_stories(
     include_read=False,
     custom_section_prompts=None,
     active_sections=None,
+    exclude_hashes=None,
+    section_order=None,
 ):
     """
     Select the most important stories for a user's briefing and categorize them
@@ -42,11 +53,11 @@ def select_briefing_stories(
     5. Intelligence classifier scores (10%)
 
     Each story is categorized (priority order):
+    - widely_covered: Story appears in 2+ feeds
     - follow_up: Unread story from a feed the user recently read
     - classifier_match: Matches user's positive intelligence classifiers
-    - trending_unread: High trending score (trending_norm > 0.5)
     - long_read: Has significant word count
-    - trending_global: Fallback for remaining stories
+    - top_stories: Fallback for remaining stories
 
     Args:
         story_sources: "all" (all feeds) or "folder:FolderName" (specific folder's feeds)
@@ -62,6 +73,9 @@ def select_briefing_stories(
 
     feed_ids = [sub.feed_id for sub in user_subs]
     feed_opens_map = {sub.feed_id: sub.feed_opens or 0 for sub in user_subs}
+    feed_frequency_map = {
+        sub.feed_id: sub.feed.average_stories_per_month or 0 for sub in user_subs if sub.feed
+    }
 
     if read_filter == "focus":
         positive_feed_ids = set(
@@ -125,6 +139,18 @@ def select_briefing_stories(
             candidate_hashes.append(story_hash)
             feed_id_for_hash[story_hash] = feed_id
 
+    # scoring.py: Exclude stories that appeared in a previous briefing (e.g. earlier
+    # same-day briefing for twice_daily users) so the user never sees the same story twice.
+    if exclude_hashes:
+        before = len(candidate_hashes)
+        candidate_hashes = [h for h in candidate_hashes if h not in exclude_hashes]
+        feed_id_for_hash = {h: fid for h, fid in feed_id_for_hash.items() if h not in exclude_hashes}
+        if before != len(candidate_hashes):
+            logging.debug(
+                " ---> Briefing scoring: excluded %s stories from previous briefings"
+                % (before - len(candidate_hashes))
+            )
+
     if not candidate_hashes:
         return []
 
@@ -163,7 +189,7 @@ def select_briefing_stories(
     stories_by_hash = {}
     for batch_start in range(0, len(candidate_hashes), 100):
         batch = candidate_hashes[batch_start : batch_start + 100]
-        for story in MStory.objects(story_hash__in=batch):
+        for story in MStory.objects(story_hash__in=batch).order_by():
             stories_by_hash[story.story_hash] = story
 
     scored = []
@@ -201,7 +227,7 @@ def select_briefing_stories(
             period_range = max(period_end_ts - period_start_ts, 1)
             recency_score = ((story_ts - period_start_ts) / period_range) * 0.1
 
-        # Intelligence score (10%): user's trained classifiers
+        # Intelligence score (10%): user's trained classifiers, weighted by match type
         intelligence_score = 0.0
         classifier_matches = []
         if story:
@@ -219,7 +245,6 @@ def select_briefing_stories(
                 classifier_feeds,
             )
             if raw_score > 0:
-                intelligence_score = 0.1
                 classifier_matches = _get_classifier_matches(
                     story,
                     classifier_feeds,
@@ -228,18 +253,35 @@ def select_briefing_stories(
                     classifier_titles,
                     feed_title_map,
                 )
+                if classifier_matches:
+                    intelligence_score = max(
+                        CLASSIFIER_WEIGHTS.get(m.split(":")[0], 0.03) for m in classifier_matches
+                    )
+                else:
+                    intelligence_score = 0.03
             elif raw_score < 0:
                 intelligence_score = -0.1
 
         total_score = (
             trending_score + feed_engagement_score + user_affinity + recency_score + intelligence_score
         )
+
+        # Infrequent feed boost: stories from feeds publishing ≤30/month get up to 2x score.
+        # Smooth linear scale: 2x at 0 stories/month, decaying to 1x at 30/month.
+        avg_stories = feed_frequency_map.get(feed_id, 0)
+        if avg_stories <= 30:
+            infrequent_boost = 2.0 - (avg_stories / 30.0)
+        else:
+            infrequent_boost = 1.0
+        total_score *= infrequent_boost
+
         scored.append(
             {
                 "story_hash": story_hash,
                 "score": total_score,
                 "is_read": read_status_map.get(story_hash, False),
                 "trending_norm": trending_norm,
+                "infrequent_boost": infrequent_boost,
                 "classifier_matches": classifier_matches,
                 "feed_id": feed_id,
             }
@@ -271,7 +313,7 @@ def select_briefing_stories(
         diverse_scored.append(s)
     scored = diverse_scored
 
-    top_candidates = scored[: max_stories * 2]
+    top_candidates = scored[: max_stories * 3]
 
     read_feeds_with_dates = {}
     for s in scored:
@@ -280,31 +322,32 @@ def select_briefing_stories(
             if story and story.story_date:
                 read_feeds_with_dates.setdefault(s["feed_id"], []).append(story.story_date)
 
-    # scoring.py: Detect duplicate stories across feeds by normalized title
-    duplicate_hashes = _find_duplicate_stories(top_candidates, stories_by_hash)
+    # scoring.py: Detect clustered stories across feeds by normalized title
+    user_feed_id_set = set(feed_ids)
+    clustered = _find_clustered_stories(top_candidates, stories_by_hash, user_feed_id_set)
 
     enriched = []
     for s in top_candidates:
         story = stories_by_hash.get(s["story_hash"])
         word_count = _estimate_word_count(story) if story else 0
 
-        # Categorize by priority: duplicates > follow_up > classifier_match > trending_unread > long_read > trending_global
-        category = "trending_global"
+        # Categorize by priority: widely_covered > infrequent > follow_up > classifier_match > long_read > top_stories
+        category = "top_stories"
 
-        if s["story_hash"] in duplicate_hashes:
-            category = "duplicates"
+        cluster_category = clustered.get(s["story_hash"])
+        if cluster_category:
+            category = cluster_category
+        elif feed_frequency_map.get(s["feed_id"], 999) <= 30:
+            category = "infrequent"
         elif not s["is_read"] and s["feed_id"] in read_feeds_with_dates:
             read_dates = read_feeds_with_dates[s["feed_id"]]
             if story and story.story_date and any(story.story_date > rd for rd in read_dates if rd):
                 category = "follow_up"
 
-        if category == "trending_global" and s["classifier_matches"]:
+        if category == "top_stories" and s["classifier_matches"]:
             category = "classifier_match"
 
-        if category == "trending_global" and s["trending_norm"] > 0.5:
-            category = "trending_unread"
-
-        if category == "trending_global" and word_count >= 800:
+        if category == "top_stories" and word_count >= 800:
             category = "long_read"
 
         enriched.append(
@@ -318,79 +361,164 @@ def select_briefing_stories(
             }
         )
 
-    result = enriched[:max_stories]
+    # scoring.py: Weighted section-priority allocation — higher-ranked sections
+    # get proportionally more stories instead of a flat global top-N cutoff.
+    by_section = defaultdict(list)
+    for s in enriched:
+        by_section[s["category"]].append(s)
+
+    order = section_order or DEFAULT_SECTION_ORDER
+    effective_sections = active_sections or DEFAULT_SECTIONS
+    active = [s for s in order if by_section.get(s) and effective_sections.get(s, True)]
+
+    n = len(active)
+    if n == 0:
+        result = []
+    else:
+        weights = [n - i for i in range(n)]  # [n, n-1, ..., 1]
+        total_weight = sum(weights)
+        result = []
+        budget_left = max_stories
+        for i, section in enumerate(active):
+            if budget_left <= 0:
+                break
+            if i == n - 1:
+                alloc = budget_left  # Last section gets remainder
+            else:
+                alloc = max(1, round(max_stories * weights[i] / total_weight))
+            alloc = min(alloc, budget_left, len(by_section[section]))
+            result.extend(by_section[section][:alloc])
+            budget_left -= alloc
 
     # scoring.py: Reserve slots for stories matching custom section prompts.
-    # Search through remaining candidates for keyword matches in story titles.
+    # Use Elasticsearch exact phrase search across title AND content, falling
+    # back to substring matching on titles if ES is unavailable or user is not indexed.
     if custom_section_prompts and active_sections:
         selected_hashes = {s["story_hash"] for s in result}
-        remaining = [s for s in enriched[max_stories:] if s["story_hash"] not in selected_hashes]
+        all_enriched_by_hash = {s["story_hash"]: s for s in enriched}
+
+        es_available = False
+        try:
+            from apps.search.models import MUserSearch
+
+            user_search = MUserSearch.get_user(user_id, create=False)
+            es_available = user_search and user_search.subscriptions_indexed
+        except Exception:
+            pass
 
         for i, prompt in enumerate(custom_section_prompts):
             custom_key = "custom_%d" % (i + 1)
             if not active_sections.get(custom_key, False) or not prompt:
                 continue
-            keywords = [w.lower() for w in prompt.split() if len(w) >= 3]
-            if not keywords:
-                continue
+
+            matched_hashes = []
+
+            if es_available:
+                try:
+                    from apps.search.models import SearchStory
+
+                    es_hashes = SearchStory.query_briefing_custom(
+                        feed_ids, prompt, period_start, period_end, limit=10
+                    )
+                    matched_hashes = [h for h in es_hashes if h in all_enriched_by_hash]
+                    logging.debug(
+                        " ---> Briefing scoring: %s ES phrase search '%s' found %s matches (%s in candidates)"
+                        % (custom_key, prompt, len(es_hashes), len(matched_hashes))
+                    )
+                except Exception as e:
+                    logging.debug(
+                        " ---> Briefing scoring: %s ES search failed, falling back to keyword: %s"
+                        % (custom_key, e)
+                    )
+                    matched_hashes = []
+
+            # Fallback: substring matching on titles if ES unavailable or returned nothing
+            if not matched_hashes:
+                keywords = [w.lower() for w in prompt.split() if len(w) >= 3]
+                if keywords:
+                    for s in enriched:
+                        story = stories_by_hash.get(s["story_hash"])
+                        if not story or not story.story_title:
+                            continue
+                        title_lower = story.story_title.lower()
+                        if all(kw in title_lower for kw in keywords):
+                            matched_hashes.append(s["story_hash"])
+                    logging.debug(
+                        " ---> Briefing scoring: %s keyword fallback '%s' found %s matches"
+                        % (custom_key, prompt, len(matched_hashes))
+                    )
+
             reserved = 0
-            for s in remaining:
+            for story_hash in matched_hashes:
                 if reserved >= 2:
                     break
-                story = stories_by_hash.get(s["story_hash"])
-                if not story or not story.story_title:
-                    continue
-                title_lower = story.story_title.lower()
-                if any(kw in title_lower for kw in keywords):
+                if story_hash in selected_hashes:
+                    for s in result:
+                        if s["story_hash"] == story_hash:
+                            s["category"] = custom_key
+                            reserved += 1
+                            break
+                else:
+                    s = all_enriched_by_hash[story_hash]
                     s["category"] = custom_key
                     result.append(s)
-                    selected_hashes.add(s["story_hash"])
+                    selected_hashes.add(story_hash)
                     reserved += 1
+
             if reserved > 0:
                 logging.debug(
                     " ---> Briefing scoring: reserved %s stories for %s (%s)" % (reserved, custom_key, prompt)
                 )
+            else:
+                logging.debug(" ---> Briefing scoring: no stories matched %s (%s)" % (custom_key, prompt))
 
     return result
 
 
-def _normalize_title(title):
-    """Normalize a story title for duplicate detection."""
-    if not title:
-        return ""
-    title = title.lower().strip()
-    title = re.sub(r"[^\w\s]", "", title)
-    title = re.sub(r"\s+", " ", title)
-    return title
+def _find_clustered_stories(candidates, stories_by_hash, user_feed_ids=None):
+    """Find stories in pre-computed clusters and categorize as widely_covered.
 
+    Checks pre-computed clusters in Redis. A story qualifies as widely_covered
+    if its cluster has 2+ unique feeds that the user subscribes to. Only uses
+    pre-computed Redis clusters — no title-based fallback, which would create
+    a mismatch with inject_widely_covered_clusters.
+    """
+    from apps.clustering.models import get_cluster_for_story, get_cluster_members
 
-def _find_duplicate_stories(candidates, stories_by_hash):
-    """
-    Find stories that appear in multiple feeds by comparing normalized titles.
-    Returns a set of story_hashes that are duplicates.
-    """
-    title_groups = {}
+    categorized = {}
+    # Convert to strings for comparison with feed IDs extracted from story hashes
+    user_feed_id_strs = {str(fid) for fid in user_feed_ids} if user_feed_ids else set()
+
+    # Check pre-computed clusters — count user-subscribed feeds in each cluster
+    candidate_hashes = {s["story_hash"] for s in candidates}
+    checked_clusters = set()
     for s in candidates:
-        story = stories_by_hash.get(s["story_hash"])
-        if not story or not story.story_title:
+        cluster_id = get_cluster_for_story(s["story_hash"])
+        if not cluster_id or cluster_id in checked_clusters:
             continue
-        norm_title = _normalize_title(story.story_title)
-        if not norm_title or len(norm_title) < 10:
+        checked_clusters.add(cluster_id)
+
+        all_members = get_cluster_members(cluster_id)
+        if len(all_members) < 2:
             continue
-        title_groups.setdefault(norm_title, []).append(s["story_hash"])
 
-    duplicate_hashes = set()
-    for norm_title, hashes in title_groups.items():
-        feed_ids = set()
-        for h in hashes:
-            story = stories_by_hash.get(h)
-            if story:
-                feed_ids.add(story.story_feed_id)
-        if len(feed_ids) >= 2:
-            for h in hashes:
-                duplicate_hashes.add(h)
+        # scoring.py: Count unique feed IDs from cluster members that the user
+        # subscribes to. Only mark as widely_covered if 2+ user feeds cover it.
+        user_cluster_feed_ids = set()
+        for member_hash in all_members:
+            feed_id_str = member_hash.split(":")[0] if ":" in member_hash else None
+            if feed_id_str and (not user_feed_id_strs or feed_id_str in user_feed_id_strs):
+                user_cluster_feed_ids.add(feed_id_str)
 
-    return duplicate_hashes
+        if len(user_cluster_feed_ids) >= 2:
+            # scoring.py: Only mark ONE candidate per cluster as widely_covered.
+            # candidates is score-ordered, so the current candidate (s) is the
+            # highest-scored one in this cluster. checked_clusters prevents
+            # re-processing, so other candidates in the same cluster fall through
+            # to their normal category (infrequent, top_stories, etc.).
+            categorized[s["story_hash"]] = "widely_covered"
+
+    return categorized
 
 
 def _get_classifier_matches(

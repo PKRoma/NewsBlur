@@ -125,10 +125,10 @@
 			</dict>
 		</dict>
 	</dict>
-	<key>NSPhotoLibraryUsageDescription</key>
-	<string>NewsBlur can save photos to your camera roll by long pressing them.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>NewsBlur uses the microphone to let you ask questions about stories using your voice.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>NewsBlur can save photos to your camera roll by long pressing them.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>NewsBlur uses speech recognition to transcribe your voice questions about stories.</string>
 	<key>NSUserActivityTypes</key>
@@ -136,6 +136,7 @@
 		<string>com.newsblur.refresh</string>
 		<string>com.newsblur.gotoFolder</string>
 		<string>com.newsblur.gotoFeed</string>
+		<string>INSendMessageIntent</string>
 	</array>
 	<key>UIAppFonts</key>
 	<array>
@@ -143,6 +144,9 @@
 		<string>WhitneySSm-Medium-Bas.otf</string>
 		<string>WhitneySSm-Book-Bas.otf</string>
 		<string>WhitneySSm-BookItalic-Bas.otf</string>
+		<string>WhitneySSm-Bold-Bas.otf</string>
+		<string>WhitneySSm-Light-Bas.otf</string>
+		<string>WhitneySSm-Semibold-Bas.otf</string>
 		<string>GothamNarrow-MediumItalic.otf</string>
 		<string>GothamNarrow-Medium.otf</string>
 		<string>GothamNarrow-Book.otf</string>

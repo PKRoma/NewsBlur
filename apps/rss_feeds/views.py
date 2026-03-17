@@ -1,3 +1,10 @@
+"""RSS feed views: feed CRUD, story detail, feed statistics, and exception handling.
+
+API endpoints for adding/removing/moving feeds, loading individual stories,
+fetching original page content, viewing feed statistics, and managing feed
+exceptions (address changes, duplicate detection).
+"""
+
 import base64
 import datetime
 import re
@@ -6,6 +13,7 @@ from collections import defaultdict
 from urllib.parse import urlparse
 
 import redis
+import requests
 from django.conf import settings
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.models import User
@@ -20,6 +28,7 @@ from django.shortcuts import get_object_or_404, render
 from django.views.decorators.http import condition
 
 from apps.analyzer.models import get_classifiers_for_user
+from apps.discover.views import IGNORE_AUTOCOMPLETE, TRENDING_CATEGORIES
 from apps.push.models import PushSubscription
 from apps.reader.models import UserSubscription
 from apps.rss_feeds.models import Feed, MFeedIcon, MFetchHistory, MStory, merge_feeds
@@ -34,33 +43,6 @@ from utils.ratelimit import ratelimit
 from utils.user_functions import ajax_login_required, get_user
 from utils.view_functions import get_argument_or_404, is_true, required_params
 from vendor.timezones.utilities import localtime_for_timezone
-
-IGNORE_AUTOCOMPLETE = [
-    "facebook.com/feeds/notifications.php",
-    "inbox",
-    "secret",
-    "password",
-    "latitude",
-]
-
-
-@ajax_login_required
-@json.json_view
-def search_feed(request):
-    address = request.GET.get("address")
-    offset = int(request.GET.get("offset", 0))
-    if not address:
-        return dict(code=-1, message="Please provide a URL/address.")
-
-    logging.user(request.user, "~FBFinding feed (search_feed): %s" % address)
-    ip = request.META.get("HTTP_X_FORWARDED_FOR", None) or request.META["REMOTE_ADDR"]
-    logging.user(request.user, "~FBIP: %s" % ip)
-    aggressive = request.user.is_authenticated
-    feed = Feed.get_feed_from_url(address, create=False, aggressive=aggressive, offset=offset)
-    if feed:
-        return feed.canonical()
-    else:
-        return dict(code=-1, message="No feed found matching that XML or website address.")
 
 
 @json.json_view
@@ -105,6 +87,7 @@ def feed_autocomplete(request):
     query = request.GET.get("term") or request.GET.get("query")
     version = int(request.GET.get("v", 1))
     autocomplete_format = request.GET.get("format", "autocomplete")
+    limit = int(request.GET.get("limit", 5))
 
     # user = get_user(request)
     # if True or not user.profile.is_premium:
@@ -129,7 +112,7 @@ def feed_autocomplete(request):
     tries_left = 5
     while len(query_params) and tries_left:
         tries_left -= 1
-        feed_ids = Feed.autocomplete(" ".join(query_params))
+        feed_ids = Feed.autocomplete(" ".join(query_params), limit=limit)
         if feed_ids:
             break
         else:
@@ -729,50 +712,45 @@ def discover_stories(request, story_hash):
 def trending_sites(request):
     """
     Returns trending feeds with their recent stories for the Trending Sites feature.
-    Uses subscription velocity from RTrendingSubscription to determine trending feeds.
+    Supports categories: popular, rising, hidden_gems, new_arrivals.
     """
     page = int(request.GET.get("page", 1))
     days = int(request.GET.get("days", 7))
+    category = request.GET.get("category", "popular")
     limit = 10
     offset = (page - 1) * limit
 
-    # Validate days parameter
     if days not in [1, 7, 30]:
         days = 7
+    if category not in TRENDING_CATEGORIES:
+        category = "popular"
 
-    # Get trending feed IDs from subscription velocity
-    # In DEBUG mode, use min_subscribers=1 to show results with limited data
-    min_subs = 1 if settings.DEBUG else RTrendingSubscription.MIN_SUBSCRIBERS_THRESHOLD
-    trending_data = RTrendingSubscription.get_trending_feeds(
-        days=days,
-        limit=limit + offset + 10,  # Get extra to account for filtering
-        min_subscribers=min_subs,
-    )
+    one_year_ago = datetime.datetime.now() - datetime.timedelta(days=365)
 
-    # Slice for pagination
-    trending_feed_ids = [int(feed_id) for feed_id, score in trending_data[offset : offset + limit]]
+    get_trending = TRENDING_CATEGORIES[category]
+    trending_feed_ids, score_map, has_more, use_fallback = get_trending(days, limit, offset, one_year_ago)
 
     if not trending_feed_ids:
         return {"trending_feeds": {}, "has_more": False}
 
-    # Build response with feed details and stories
-    feeds = Feed.objects.filter(pk__in=trending_feed_ids)
+    feeds = Feed.objects.filter(
+        pk__in=trending_feed_ids, last_story_date__gte=one_year_ago, branch_from_feed__isnull=True
+    )
     feeds_dict = {feed.pk: feed for feed in feeds}
 
-    # Build ordered response preserving trending order
     trending_feeds = {}
     for feed_id in trending_feed_ids:
         if feed_id in feeds_dict:
             feed = feeds_dict[feed_id]
-            # Find score for this feed
-            score = next((s for fid, s in trending_data if int(fid) == feed_id), 0)
+            score = feed.num_subscribers if use_fallback else score_map.get(feed_id, 0)
             trending_feeds[feed_id] = {
                 "feed": feed.canonical(include_favicon=False),
                 "stories": feed.get_stories(limit=5),
                 "trending_score": score,
             }
 
-    has_more = len(trending_data) > offset + limit
-
-    logging.user(request, "~FCTrending sites (page %s, %sd): ~SB%s feeds" % (page, days, len(trending_feeds)))
+    logging.user(
+        request,
+        "~FCTrending sites/%s (page %s, %sd): ~SB%s feeds" % (category, page, days, len(trending_feeds)),
+    )
     return {"trending_feeds": trending_feeds, "has_more": has_more}

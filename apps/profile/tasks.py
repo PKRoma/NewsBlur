@@ -1,3 +1,5 @@
+"""Profile tasks: user lifecycle management including onboarding, premium tiers, and cleanup."""
+
 import datetime
 
 from django.conf import settings
@@ -61,6 +63,23 @@ def EmailNewPremiumPro(user_id):
 def EmailNewPremiumTrial(user_id):
     user_profile = Profile.objects.get(user__pk=user_id)
     user_profile.send_premium_trial_welcome_email()
+
+
+@app.task(name="email-staff-premium-upgrade")
+def EmailStaffPremiumUpgrade(user_id, tier, previous_tier):
+    from django.core.cache import cache
+
+    # Deduplicate: only send one staff upgrade email per user+tier within 1 hour
+    cache_key = f"staff_premium_upgrade_email:{user_id}:{tier}"
+    if cache.get(cache_key):
+        logging.debug(
+            " ---> Skipping duplicate staff premium upgrade email for user_id=%s tier=%s" % (user_id, tier)
+        )
+        return
+    cache.set(cache_key, True, timeout=3600)
+
+    user_profile = Profile.objects.get(user__pk=user_id)
+    user_profile.send_staff_premium_upgrade_email(tier=tier, previous_tier=previous_tier)
 
 
 @app.task(name="premium-expire")
@@ -195,7 +214,10 @@ def EmailFeedLimitNotifications():
             continue
 
         # Skip if already sent
-        if MSentEmail.objects.filter(receiver_user_id=user.pk, email_type="feed_limit_notification").exists():
+        if (
+            MSentEmail.objects.filter(receiver_user_id=user.pk, email_type="feed_limit_notification").count()
+            > 0
+        ):
             continue
 
         deadline = profile.grandfather_expires

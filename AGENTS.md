@@ -1,6 +1,14 @@
 # NewsBlur Development Guidelines
 
-## Ask Questions Liberally
+## Planning & Clarification
+**IMPORTANT: Before starting any implementation or creating a plan, ask clarifying questions in chat.** The AskUserQuestion tool is not available in Codex/Claude Code, so use normal questions to understand:
+- The specific goals and desired outcomes
+- Edge cases and error handling preferences
+- UI/UX preferences (if applicable)
+- Performance or scalability requirements
+- Integration points with existing code
+- Testing expectations
+- Any constraints or preferences I might have
 
 **Codex: Use the `request_user_input` tool frequently throughout development - not just during planning.**
 **Claude: Continue using the AskUserQuestion tool frequently throughout development - not just during planning.**
@@ -27,8 +35,12 @@ Don't assume - ask. Multiple rounds of questions are better than one large batch
 
 For debugging sessions: always take a screenshot first, reproduce the issue, then form a hypothesis before changing code. Do not start editing until the root cause is identified.
 
+## Bug Fixing Workflow
+When I report a bug, don't start by trying to fix it. Instead, start by writing a test that reproduces the bug. Then, have subagents try to fix the bug and prove it with a passing test.
+
 ## Platform-Specific Guidelines
 - **iOS**: See `clients/ios/CLAUDE.md` for iOS simulator testing and development
+  - **All new iOS files must be written in Swift** (not Objective-C)
 
 ## Git Worktree Development
 - **Use git worktrees for parallel development**: Run `make worktree` in a worktree to start workspace-specific services
@@ -72,7 +84,10 @@ Note: All docker commands must use `-t` instead of `-it` to avoid interactive mo
 - Example (worktree): `docker exec -t newsblur_web_search-by-phrase python manage.py test apps`
 
 ## Deployment Commands
-- `aps` - Alias for `ansible-playbook ansible/setup.yml`
+- `aps` - Alias for `ansible-playbook ansible/setup.yml` - Used only for setting up new servers or making global config changes (e.g., installing new packages). While it does deploy code changes, use apd for deployment
+- `apd` - Alias for `ansible-playbook ansible/deploy.yml` - Used for regular code deployments. This is the command to run after merging a PR to main. It deploys code changes and restarts services without making global config changes. 
+
+Unless asked, don't run either of these. Assume I will deploy or ask you to deploy when ready.
 
 ## SSH Access to Servers
 To SSH into NewsBlur servers non-interactively:
@@ -155,8 +170,8 @@ sentry-cli --url https://sentry.newsblur.com issues resolve -o newsblur -p web -
 5. Resolve the issue with `sentry-cli issues resolve -i <issue_id>`
 
 ## Browser Testing
-- Use the Chrome DevTools MCP server for browser automation and testing
-- Local dev: `https://localhost` (self-signed certs are accepted by default)
+- **Do NOT use the Chrome DevTools MCP server unless explicitly asked** — the user will verify manually
+- Local dev: `https://localhost` for main repo. In a worktree, run `make worktree` first, then `./worktree-dev.sh` to get the assigned ports/URLs.
 - **Screenshots**: Save to `/tmp/newsblur-screenshot.png`, then use Read tool to view
 
 ### Dev Auto-Login (DEBUG mode only)
@@ -234,6 +249,9 @@ p.save()
   - Mongo (`hdb-mongo-*`): `mongo`
   - Postgres (`hdb-postgres-*`): `postgres`
   - Nginx (`hwww`): `nginx`, `haproxy`
+
+## Downtime Investigation
+When the user reports downtime, read `DOWNTIME.md` for the full investigation playbook, then run `./utils/check_health.sh`.
 
 ## Writing Emails
 - Never use em dashes

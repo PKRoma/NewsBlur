@@ -63,20 +63,37 @@ LENGTH_INSTRUCTIONS = {
 }
 
 STYLE_INSTRUCTIONS = {
-    "editorial": "Write in a narrative editorial style with flowing prose that connects stories thematically.",
+    "editorial": (
+        "Within each section, briefly explain WHY these stories matter to the reader — not just what "
+        "they are about. Focus on what makes each story worth reading. "
+        "Write in a narrative editorial style with flowing prose that connects stories thematically. "
+        "IMPORTANT: Weave each story link naturally into a sentence — never start a paragraph with the "
+        "story link. Lead with your editorial commentary, then reference the story title mid-sentence or "
+        "at the end. "
+        "Wrap each story paragraph in a <p> tag. Do NOT use <ul> or <li> tags."
+    ),
     "bullets": (
-        "Use bullet points for each story. Group by the section headers below. "
-        "Each bullet should be one sentence."
+        "Within each section, briefly explain WHY these stories matter to the reader — not just what "
+        "they are about. Focus on what makes each story worth reading. "
+        "Write each story as a concise one-sentence summary. Group by the section headers below. "
+        "Wrap each story in its own <p> tag. Do NOT use <ul> or <li> tags."
     ),
     "headlines": (
-        "List each story as a headline with a single explanatory sentence beneath it. "
-        "Group by the section headers below."
+        "List each story as ONLY the headline — absolutely no commentary, no explanatory sentences, "
+        "no dashes followed by descriptions, just the linked story title and nothing else. "
+        "Group by the section headers below. "
+        "Wrap each story in its own <p> tag. Do NOT use <ul> or <li> tags."
     ),
 }
 
 
 SECTION_PROMPTS = {
-    "trending_unread": '"Stories you missed" — CATEGORY: trending_unread. Popular stories the reader hasn\'t read yet.',
+    "top_stories": '"Top stories" — CATEGORY: top_stories. The most important stories from the reader\'s feeds.',
+    "infrequent": (
+        '"From infrequent sites" — CATEGORY: infrequent. '
+        "Stories from feeds that publish rarely. "
+        "Do NOT mention how rarely the site posts or that it's infrequent — just describe the story normally."
+    ),
     "long_read": '"Long reads for later" — CATEGORY: long_read. Longer articles worth setting time aside for. Use the WORD_COUNT field to judge which stories qualify as long reads relative to other stories.',
     "classifier_match": (
         '"Based on your interests" — CATEGORY: classifier_match. '
@@ -92,43 +109,66 @@ SECTION_PROMPTS = {
         "and VALUE is the text after the colon. Include all matches, not just the first one."
     ),
     "follow_up": '"Follow-ups" — CATEGORY: follow_up. New posts from feeds where the reader recently read other stories.',
-    "trending_global": '"Trending across NewsBlur" — CATEGORY: trending_global. Widely-read stories from across the platform.',
-    "duplicates": '"Common stories" — CATEGORY: duplicates. Stories covered by multiple feeds. For each story, show the shared headline then list each source\'s unique angle or perspective as sub-items.',
-    "quick_catchup": '"Quick catch-up" — KEY: quick_catchup. This is a special section. Select the 3-5 most important stories from the entire briefing and write a 1-2 sentence TL;DR for each. Link to each story using the anchor tag format specified below. This section should appear first.',
-    "emerging_topics": '"Emerging topics" — Look across all the stories for topics that appear multiple times or are getting increasing coverage. Group these stories under the topic and explain why it\'s trending.',
-    "contrarian_views": '"Contrarian views" — Look for stories where different feeds have notably different perspectives on the same topic. Highlight the disagreement and present each side.',
+    "widely_covered": (
+        '"Widely covered" — CATEGORY: widely_covered. '
+        "Stories covered by multiple feeds and sources. "
+        "Check the CLUSTER annotation for pre-identified groupings. "
+        "Write a brief editorial description of each story's significance. "
+        "Do NOT list individual sources or feed names — source links will be added automatically."
+    ),
 }
 
 
 def _build_system_prompt(
-    summary_length="medium", summary_style="bullets", sections=None, custom_section_prompts=None
+    summary_length="medium",
+    summary_style="bullets",
+    sections=None,
+    custom_section_prompts=None,
+    section_order=None,
 ):
     """Build the system prompt based on user preferences for length, style, and sections."""
-    from apps.briefing.models import DEFAULT_SECTIONS
+    from apps.briefing.models import DEFAULT_SECTION_ORDER, DEFAULT_SECTIONS
 
     length_instruction = LENGTH_INSTRUCTIONS.get(summary_length, LENGTH_INSTRUCTIONS["medium"])
     style_instruction = STYLE_INSTRUCTIONS.get(summary_style, STYLE_INSTRUCTIONS["bullets"])
 
     active_sections = sections if sections else DEFAULT_SECTIONS
+    ordered_keys = section_order if section_order else DEFAULT_SECTION_ORDER
+    prompts = custom_section_prompts or []
+
     section_lines = []
     num = 1
-    for key, prompt in SECTION_PROMPTS.items():
-        if active_sections.get(key, False):
-            section_lines.append("%d. %s" % (num, prompt))
-            num += 1
+    seen_keys = set()
+    # summary.py: Iterate in user's preferred order so the LLM generates sections in that order
+    for key in ordered_keys:
+        seen_keys.add(key)
+        if key in SECTION_PROMPTS:
+            if active_sections.get(key, False):
+                section_lines.append("%d. %s" % (num, SECTION_PROMPTS[key]))
+                num += 1
+        elif key.startswith("custom_"):
+            idx = int(key.split("_")[1]) - 1
+            if 0 <= idx < len(prompts) and prompts[idx] and active_sections.get(key, False):
+                section_lines.append(
+                    "%d. Keyword section (KEY: %s) — The reader has a keyword section that matches stories "
+                    'with these keywords: "%s". Generate a section header based on the keywords. '
+                    "ONLY include stories whose CATEGORY field is set to %s." % (num, key, prompts[idx], key)
+                )
+                num += 1
 
-    # summary.py: Add custom sections (up to 5) with user-defined prompts
-    prompts = custom_section_prompts or []
+    # summary.py: Catch any sections not in section_order (e.g. newly added custom sections)
+    for key, prompt_text in SECTION_PROMPTS.items():
+        if key not in seen_keys and active_sections.get(key, False):
+            section_lines.append("%d. %s" % (num, prompt_text))
+            num += 1
     for i, prompt in enumerate(prompts):
         custom_key = "custom_%d" % (i + 1)
-        if active_sections.get(custom_key, False) and prompt:
+        if custom_key not in seen_keys and active_sections.get(custom_key, False) and prompt:
             section_lines.append(
-                '%d. Custom section (KEY: %s) — The reader has requested a custom section with this prompt: "%s". '
-                "Generate an appropriate section header for this content. "
-                "ONLY include stories that are genuinely and directly about this topic. "
-                "If no stories clearly match this prompt, do NOT include this section at all — "
-                "do not stretch or loosely interpret the prompt to fit unrelated stories."
-                % (num, custom_key, prompt)
+                "%d. Keyword section (KEY: %s) — The reader has a keyword section that matches stories "
+                'with these keywords: "%s". Generate a section header based on the keywords. '
+                "ONLY include stories whose CATEGORY field is set to %s."
+                % (num, custom_key, prompt, custom_key)
             )
             num += 1
 
@@ -140,13 +180,10 @@ it was selected for them.
 
 Organize the briefing into sections based on these categories. Use ONLY these section headers
 (as <h3 data-section="CATEGORY_KEY"> tags, where CATEGORY_KEY is the category value like
-"trending_unread" or "classifier_match"). You MUST include every section listed below if there
+"top_stories" or "classifier_match"). You MUST include every section listed below if there
 are stories that match it. Do not omit sections to save space:
 
 %s
-
-Within each section, briefly explain WHY these stories matter to the reader — not just what
-they are about. Focus on what makes each story worth reading.
 
 %s
 
@@ -154,6 +191,9 @@ they are about. Focus on what makes each story worth reading.
 
 Reference each story by wrapping its title in an anchor tag like:
 <a class="NB-briefing-story-link" data-story-hash="HASH">Story Title</a>
+
+CRITICAL: Each story must appear in exactly ONE section. Never reference the same story
+with an anchor tag in multiple sections.
 
 Output valid HTML. Use <h3 data-section="CATEGORY_KEY"> for section headers.
 Do not use markdown. Do not wrap in code fences. Do not add any preamble.
@@ -174,6 +214,7 @@ def generate_briefing_summary(
     sections=None,
     custom_section_prompts=None,
     model=None,
+    section_order=None,
 ):
     """
     Generate an editorial summary of the selected stories.
@@ -192,7 +233,7 @@ def generate_briefing_summary(
     story_hashes = [s["story_hash"] for s in scored_stories]
 
     stories_by_hash = {}
-    for story in MStory.objects(story_hash__in=story_hashes):
+    for story in MStory.objects(story_hash__in=story_hashes).order_by():
         stories_by_hash[story.story_hash] = story
 
     feed_ids = set()
@@ -202,18 +243,18 @@ def generate_briefing_summary(
     for feed in Feed.objects.filter(pk__in=feed_ids).only("pk", "feed_title"):
         feeds_by_id[feed.pk] = feed.feed_title
 
-    # summary.py: Remap story categories for disabled sections to "trending_global" so the
+    # summary.py: Remap story categories for disabled sections to "top_stories" so the
     # LLM doesn't see category annotations for sections it shouldn't create.
     from apps.briefing.models import DEFAULT_SECTIONS
 
     active_sections = sections if sections else DEFAULT_SECTIONS
     category_overrides = {}
     for scored in scored_stories:
-        category = scored.get("category", "trending_global")
-        if category.startswith("custom_") or category == "trending_global":
+        category = scored.get("category", "top_stories")
+        if category.startswith("custom_") or category == "top_stories":
             continue
         if not active_sections.get(category, False):
-            category_overrides[scored["story_hash"]] = "trending_global"
+            category_overrides[scored["story_hash"]] = "top_stories"
 
     story_lines = []
     for scored in scored_stories:
@@ -243,6 +284,38 @@ def generate_briefing_summary(
 
         if scored.get("classifier_matches"):
             line += "\n  MATCHES: %s" % ", ".join(scored["classifier_matches"])
+
+        # summary.py: Add cluster info if this story is part of a pre-computed cluster.
+        # Look up cluster members from Redis and fetch feed titles from the DB,
+        # not just from stories_by_hash (which only contains curated stories and
+        # almost never includes cluster members from other feeds).
+        from apps.clustering.models import get_cluster_for_story, get_cluster_members
+
+        cluster_id = get_cluster_for_story(story_hash)
+        if cluster_id:
+            cluster_members = get_cluster_members(cluster_id)
+            other_feed_ids = set()
+            for member_hash in cluster_members:
+                if member_hash != story_hash:
+                    member_feed_id_str = member_hash.split(":")[0] if ":" in member_hash else None
+                    if member_feed_id_str:
+                        try:
+                            other_feed_ids.add(int(member_feed_id_str))
+                        except ValueError:
+                            pass
+            # Remove this story's own feed
+            other_feed_ids.discard(story.story_feed_id)
+            if other_feed_ids:
+                # Fetch feed titles for cluster members not already in feeds_by_id
+                missing_ids = other_feed_ids - set(feeds_by_id.keys())
+                if missing_ids:
+                    for f in Feed.objects.filter(pk__in=missing_ids).only("pk", "feed_title"):
+                        feeds_by_id[f.pk] = f.feed_title
+                other_feeds = [
+                    feeds_by_id[fid] for fid in other_feed_ids if fid in feeds_by_id and feeds_by_id[fid]
+                ]
+                if other_feeds:
+                    line += "\n  CLUSTER: Also covered by: %s" % ", ".join(other_feeds[:5])
 
         story_lines.append(line)
 
@@ -274,7 +347,9 @@ def generate_briefing_summary(
                 logging.error(" ---> Briefing summary failed for user %s: no API key configured" % user_id)
                 return None
 
-        system_prompt = _build_system_prompt(summary_length, summary_style, sections, custom_section_prompts)
+        system_prompt = _build_system_prompt(
+            summary_length, summary_style, sections, custom_section_prompts, section_order
+        )
         # summary.py: Scale max_tokens based on story/section count to avoid truncation
         num_sections = sum(1 for v in (sections or {}).values() if v)
         max_tokens = min(1024 + (len(scored_stories) * 80) + (num_sections * 100), 4096)
@@ -334,8 +409,10 @@ def extract_section_summaries(summary_html):
     if not summary_html:
         return {}
 
-    # summary.py: Split on h3 tags with data-section attributes
-    pattern = r'(<h3\s+data-section="([^"]+)"[^>]*>)'
+    # summary.py: Split on h3 tags with data-section attributes.
+    # Use [^>]*? before data-section so we match even if the LLM adds other
+    # attributes (class, style) before data-section in the opening tag.
+    pattern = r'(<h3\s[^>]*?data-section="([^"]+)"[^>]*>)'
     parts = re.split(pattern, summary_html)
 
     sections = {}
@@ -360,8 +437,12 @@ def extract_section_summaries(summary_html):
         # Content runs until the next h3 or end
         content = parts[i + 2] if i + 2 < len(parts) else ""
 
-        # summary.py: Strip trailing </div> that closes the outer wrapper
-        content = re.sub(r"\s*</div>\s*$", "", content)
+        # summary.py: Strip trailing </div> that closes the outer wrapper, but ONLY
+        # from the last section. Non-last sections don't have the outer </div>, so
+        # stripping would remove a story's closing </div> and break nesting.
+        is_last_section = i + 3 >= len(parts)
+        if is_last_section:
+            content = re.sub(r"\s*</div>\s*$", "", content)
 
         section_html = '<div class="NB-briefing-summary">%s%s</div>' % (h3_tag, content)
         sections[section_key] = section_html
@@ -386,15 +467,11 @@ def extract_section_story_hashes(section_summaries):
 
 
 BRIEFING_SECTION_ICONS = {
-    "trending_unread": "indicator-unread-gray.svg",
+    "top_stories": "indicator-unread-gray.svg",
     "long_read": "scroll.svg",
     "classifier_match": "train.svg",
     "follow_up": "boomerang.svg",
-    "trending_global": "discover.svg",
-    "duplicates": "venn.svg",
-    "quick_catchup": "pulse.svg",
-    "emerging_topics": "growth-rocket-gray.svg",
-    "contrarian_views": "stack.svg",
+    "widely_covered": "growth-rocket-gray.svg",
     "custom_1": "prompt.svg",
     "custom_2": "prompt.svg",
     "custom_3": "prompt.svg",
@@ -445,7 +522,7 @@ def embed_briefing_icons(summary_html, scored_stories):
 
     story_hashes = [s["story_hash"] for s in scored_stories]
     stories_by_hash = {}
-    for story in MStory.objects(story_hash__in=story_hashes):
+    for story in MStory.objects(story_hash__in=story_hashes).order_by():
         stories_by_hash[story.story_hash] = story
 
     feed_ids = set(s.story_feed_id for s in stories_by_hash.values())
@@ -493,16 +570,25 @@ def embed_briefing_icons(summary_html, scored_stories):
 
     # --- Phase 4: Style <li> tags — clean spacing, no bottom border ---
 
-    li_style = "margin:0 0 12px 0;padding:0;line-height:1.5;"
+    li_style = "margin:0 0 12px 0;padding:0;line-height:1.5;font-size:18px;"
     summary_html = re.sub(
         r"<li(?P<attrs>[^>]*)>",
         lambda m: '<li%s style="%s">' % (m.group("attrs"), li_style),
         summary_html,
     )
 
+    # --- Phase 4b: Style <p> tags — consistent spacing for editorial/headlines ---
+
+    p_style = "margin:0 0 12px 0;padding:0 0 0 22px;line-height:1.5;font-size:18px;"
+    summary_html = re.sub(
+        r"<p(?P<attrs>[^>]*)>",
+        lambda m: '<p%s style="%s">' % (m.group("attrs"), p_style),
+        summary_html,
+    )
+
     # --- Phase 5: Embed favicons BEFORE story links as visual bullets ---
 
-    favicon_style = "width:16px;height:16px;border-radius:2px;"
+    favicon_style = "width:16px;height:16px;border-radius:2px;margin:4px 4px 0 0;vertical-align:top;"
 
     def _replace_story_link(match):
         tag = match.group(0)
@@ -553,7 +639,7 @@ def embed_briefing_icons(summary_html, scored_stories):
             '%s<table cellpadding="0" cellspacing="0" border="0" style="width:100%%;">'
             "<tr>"
             '<td style="width:22px;vertical-align:top;padding-top:0;">%s</td>'
-            '<td style="vertical-align:top;">%s</td>'
+            '<td style="vertical-align:top;font-size:18px;line-height:1.5;">%s</td>'
             "</tr></table></li>" % (li_tag, favicon_img, rest)
         )
 
@@ -564,17 +650,51 @@ def embed_briefing_icons(summary_html, scored_stories):
         flags=re.DOTALL,
     )
 
+    # --- Phase 5c: Wrap favicon + text in table layout for <p> tags (editorial/headlines) ---
+
+    def _tablify_p(match):
+        p_tag = match.group(1)
+        content = match.group(2)
+        favicon_match = re.match(
+            r"(\s*<img[^>]*NB-briefing-inline-favicon[^>]*>)\s*(.*)",
+            content,
+            re.DOTALL,
+        )
+        if not favicon_match:
+            return match.group(0)
+        favicon_img = favicon_match.group(1)
+        rest = favicon_match.group(2)
+        # summary.py: Convert <p> to <div> because <table> cannot nest inside <p>.
+        # Browsers auto-close <p> before block elements, causing a blank <p> that
+        # offsets the favicon and breaks font inheritance.
+        div_tag = re.sub(r"^<p\b", "<div", p_tag)
+        return (
+            '%s<table cellpadding="0" cellspacing="0" border="0" style="width:100%%;">'
+            "<tr>"
+            '<td style="width:22px;vertical-align:top;padding-top:0;">%s</td>'
+            '<td style="vertical-align:top;font-size:18px;line-height:1.5;">%s</td>'
+            "</tr></table></div>" % (div_tag, favicon_img, rest)
+        )
+
+    summary_html = re.sub(
+        r"(<p[^>]*>)(.*?)</p>",
+        _tablify_p,
+        summary_html,
+        flags=re.DOTALL,
+    )
+
     # --- Phase 6: Style classifier pills with inline CSS ---
 
     classifier_pill_style = (
         "display:inline-block;background-color:#34912E;"
         "border:1px solid #202020;border-radius:14px;"
-        "padding:2px 8px;font-size:10px;line-height:16px;"
-        "margin:3px 4px 3px 0;white-space:nowrap;"
+        "padding:1px 8px;font-size:11px;line-height:16px;"
+        "margin:0 4px 0 0;white-space:nowrap;vertical-align:text-bottom;"
+        "text-decoration:none;"
     )
-    classifier_label_style = "color:white;"
-    classifier_b_style = "color:rgba(255,255,255,0.7);font-weight:normal;"
-    classifier_value_style = "color:white;text-shadow:1px 1px 0 rgba(0,0,0,0.5);"
+    classifier_label_style = "color:white;text-decoration:none;"
+    classifier_b_style = "color:rgba(255,255,255,0.7);font-weight:normal;text-decoration:none;"
+    classifier_value_style = "color:white;text-shadow:1px 1px 0 rgba(0,0,0,0.5);text-decoration:none;"
 
     def _style_classifier_block(match):
         block = match.group(0)
@@ -613,7 +733,7 @@ def embed_briefing_icons(summary_html, scored_stories):
 
     if thumbs_up_data_uri:
         thumbs_up_style = (
-            "display:inline-block;width:12px;height:12px;" "vertical-align:middle;margin-right:3px;"
+            "display:inline-block;width:12px;height:12px;" "vertical-align:middle;margin:0 3px 0 0;"
         )
         thumbs_up_img = '<img src="%s" class="NB-classifier-icon-like" style="%s" alt="">' % (
             thumbs_up_data_uri,
@@ -625,6 +745,28 @@ def embed_briefing_icons(summary_html, scored_stories):
             summary_html,
         )
 
+    # --- Phase 7b: Override auto-linked text inside classifier pills ---
+    # Mail.app auto-links domain names (e.g. "kottke.org") inside classifier
+    # pills, turning them blue/underlined. Style any <a> tags inside pills to
+    # keep white text with no underline.
+    auto_link_style = "color:white;text-decoration:none;"
+
+    def _fix_autolinked_classifiers(match):
+        block = match.group(0)
+        block = re.sub(
+            r"<a\b([^>]*)>",
+            lambda m: '<a%s style="%s">' % (m.group(1), auto_link_style),
+            block,
+        )
+        return block
+
+    summary_html = re.sub(
+        r"<span\s[^>]*NB-briefing-classifier[^>]*>.*?</span>",
+        _fix_autolinked_classifiers,
+        summary_html,
+        flags=re.DOTALL,
+    )
+
     # --- Phase 8: Style <h3> section headers and embed section icons ---
 
     h3_style = (
@@ -633,7 +775,7 @@ def embed_briefing_icons(summary_html, scored_stories):
         "border-bottom:2px solid #e8e8e8;"
     )
     section_icon_style = (
-        "display:inline-block;width:1em;height:1em;" "vertical-align:-0.1em;margin-right:0.3em;"
+        "display:inline-block;width:1em;height:1em;" "vertical-align:-0.1em;margin:0 0.3em 0 0;"
     )
 
     def _replace_section_header(match):
@@ -659,10 +801,11 @@ def embed_briefing_icons(summary_html, scored_stories):
     return summary_html
 
 
-def filter_disabled_sections(summary_html, active_sections):
+def filter_disabled_sections(summary_html, active_sections, section_order=None):
     """
     Remove sections from briefing HTML that correspond to disabled sections.
-    Parses via extract_section_summaries and rebuilds with only allowed sections.
+    Parses via extract_section_summaries and rebuilds with only allowed sections,
+    respecting section_order for output ordering.
     """
     if not summary_html or not active_sections:
         return summary_html
@@ -672,21 +815,250 @@ def filter_disabled_sections(summary_html, active_sections):
         return summary_html
 
     allowed = {k for k, v in active_sections.items() if v}
-    # Always keep trending_global as the fallback section
-    allowed.add("trending_global")
+    # Always keep top_stories as the fallback section
+    allowed.add("top_stories")
 
     filtered = {k: v for k, v in sections.items() if k in allowed}
     if not filtered:
         return summary_html
 
-    # Rebuild: concatenate section HTML blocks
-    parts = []
-    for section_html in filtered.values():
-        inner = re.sub(r'^<div class="NB-briefing-summary">', "", section_html)
-        inner = re.sub(r"</div>$", "", inner)
-        parts.append(inner)
+    return _rebuild_ordered(filtered, section_order)
 
+
+def enforce_exclusive_sections(section_summaries, section_order=None):
+    """Ensure no story hash appears in multiple sections.
+
+    Iterates in section_order so higher-priority sections win duplicate ownership.
+    """
+    from apps.briefing.models import DEFAULT_SECTION_ORDER
+
+    order = section_order if section_order else DEFAULT_SECTION_ORDER
+    seen_hashes = set()
+    result = {}
+
+    # summary.py: Process in user's preferred order so earlier sections win
+    for key in order:
+        if key not in section_summaries:
+            continue
+        html = section_summaries[key]
+        section_hashes = set(re.findall(r'data-story-hash="([^"]+)"', html))
+        dupes = section_hashes & seen_hashes
+        if dupes:
+            html = _strip_duplicate_story_links(html, dupes)
+        seen_hashes.update(section_hashes - dupes)
+        result[key] = html
+
+    # Catch any sections not in the order list
+    for key, html in section_summaries.items():
+        if key not in result:
+            section_hashes = set(re.findall(r'data-story-hash="([^"]+)"', html))
+            dupes = section_hashes & seen_hashes
+            if dupes:
+                html = _strip_duplicate_story_links(html, dupes)
+            seen_hashes.update(section_hashes - dupes)
+            result[key] = html
+
+    return result
+
+
+def _strip_duplicate_story_links(html, hashes_to_strip):
+    """Convert anchor tags for specified hashes to plain text, preserving title."""
+
+    def _replace(match):
+        if match.group("hash") in hashes_to_strip:
+            return match.group("title")
+        return match.group(0)
+
+    pattern = (
+        r"(?:<img\s[^>]*NB-briefing-inline-favicon[^>]*>\s*)?"
+        r'<a\s[^>]*data-story-hash="(?P<hash>[^"]+)"[^>]*>(?P<title>.*?)</a>'
+    )
+    return re.sub(pattern, _replace, html, flags=re.DOTALL)
+
+
+def rebuild_summary_from_sections(section_summaries, section_order=None):
+    """Reconstruct full briefing HTML from per-section blocks, respecting section_order."""
+    return _rebuild_ordered(section_summaries, section_order)
+
+
+def _rebuild_ordered(section_summaries, section_order=None):
+    """Concatenate section HTML blocks in section_order, with fallback for unordered keys."""
+    from apps.briefing.models import DEFAULT_SECTION_ORDER
+
+    order = section_order if section_order else DEFAULT_SECTION_ORDER
+    parts = []
+    seen = set()
+    for key in order:
+        if key in section_summaries:
+            inner = re.sub(r'^<div class="NB-briefing-summary">', "", section_summaries[key])
+            inner = re.sub(r"</div>$", "", inner)
+            parts.append(inner)
+            seen.add(key)
+    # Catch any sections not in the order list
+    for key, section_html in section_summaries.items():
+        if key not in seen:
+            inner = re.sub(r'^<div class="NB-briefing-summary">', "", section_html)
+            inner = re.sub(r"</div>$", "", inner)
+            parts.append(inner)
     return '<div class="NB-briefing-summary">%s</div>' % "".join(parts)
+
+
+def inject_widely_covered_clusters(summary_html, scored_stories, user_id):
+    """Post-process widely_covered section to inject cluster member story lists.
+
+    For each story link in the widely_covered section:
+    1. Converts the <a> tag to <strong> (headline becomes bold topic name, not a link)
+    2. Looks up the story's cluster in Redis
+    3. Fetches all cluster member stories from the user's subscribed feeds
+    4. Injects <p> tags with story links for each member after the editorial paragraph
+
+    Must be called BEFORE embed_briefing_icons() so favicons get embedded for
+    cluster member stories.
+
+    Returns:
+        (modified_html, extra_story_dicts) where extra_story_dicts contains
+        dicts with 'story_hash' key for embed_briefing_icons() favicon lookup.
+    """
+    from apps.clustering.models import get_cluster_for_story, get_cluster_members
+    from apps.reader.models import UserSubscription
+
+    if not summary_html:
+        return summary_html, []
+
+    # summary.py: Find the widely_covered section boundaries
+    section_start_match = re.search(r'<h3[^>]*data-section="widely_covered"', summary_html)
+    if not section_start_match:
+        return summary_html, []
+
+    section_content_start = section_start_match.start()
+    # Section ends at the next <h3 data-section= or end of content
+    next_section = re.search(r"<h3[^>]*data-section=", summary_html[section_start_match.end() :])
+    if next_section:
+        section_end = section_start_match.end() + next_section.start()
+    else:
+        # Last section — find the closing </div> of the outer wrapper
+        section_end = len(summary_html)
+
+    section_html = summary_html[section_content_start:section_end]
+
+    # Find all story links in the section
+    story_link_pattern = r'<a\s[^>]*data-story-hash="([^"]+)"[^>]*>(.*?)</a>'
+    story_links = list(re.finditer(story_link_pattern, section_html, re.DOTALL))
+    if not story_links:
+        return summary_html, []
+
+    # Get user's subscribed feeds
+    user_feed_ids = set(
+        UserSubscription.objects.filter(user_id=user_id, active=True).values_list("feed_id", flat=True)
+    )
+
+    # summary.py: Collect all cluster members across all widely_covered stories
+    processed_clusters = set()
+    story_cluster_map = {}  # story_hash -> list of member hashes
+    all_member_hashes = set()
+
+    for match in story_links:
+        story_hash = match.group(1)
+        cluster_id = get_cluster_for_story(story_hash)
+        if not cluster_id or cluster_id in processed_clusters:
+            continue
+        processed_clusters.add(cluster_id)
+
+        members = get_cluster_members(cluster_id)
+        # Filter to user's subscribed feeds
+        user_members = []
+        for m in members:
+            member_feed_id = int(m.split(":", 1)[0]) if ":" in m else None
+            if member_feed_id and member_feed_id in user_feed_ids:
+                user_members.append(m)
+
+        if len(user_members) >= 2:
+            story_cluster_map[story_hash] = user_members
+            all_member_hashes.update(user_members)
+
+    if not story_cluster_map:
+        return summary_html, []
+
+    # Batch-fetch story metadata for all cluster members
+    member_metadata = {}
+    member_hash_list = list(all_member_hashes)
+    for batch_start in range(0, len(member_hash_list), 100):
+        batch = member_hash_list[batch_start : batch_start + 100]
+        for story in (
+            MStory.objects(story_hash__in=batch).only("story_hash", "story_feed_id", "story_title").order_by()
+        ):
+            member_metadata[story.story_hash] = story
+
+    # summary.py: Process each story link in reverse order so insertions don't shift offsets
+    extra_story_dicts = []
+    scored_hashes = {s["story_hash"] for s in scored_stories}
+
+    for match in reversed(story_links):
+        story_hash = match.group(1)
+        link_title = match.group(2)
+        full_link = match.group(0)
+        bold_title = "<strong>%s</strong>" % link_title
+        members = story_cluster_map.get(story_hash)
+
+        if not members:
+            # summary.py: Orphan widely_covered story — no cluster members found.
+            # Still convert to bold so it looks like a separate topic headline,
+            # not a cluster member link of the previous story.
+            p_close = section_html.find("</p>", match.end())
+            if p_close == -1:
+                continue
+            p_close += len("</p>")
+            modified_paragraph = section_html[: match.start()] + section_html[
+                match.start() : p_close
+            ].replace(full_link, bold_title, 1)
+            section_html = modified_paragraph + section_html[p_close:]
+            continue
+
+        # Build cluster member list HTML
+        member_lines = []
+        for m_hash in members:
+            m_story = member_metadata.get(m_hash)
+            if not m_story:
+                continue
+            m_title = m_story.story_title or "Untitled"
+            member_lines.append(
+                '<p><a class="NB-briefing-story-link" data-story-hash="%s">%s</a></p>'
+                % (m_hash, html_mod.escape(m_title))
+            )
+            if m_hash not in scored_hashes:
+                extra_story_dicts.append({"story_hash": m_hash})
+
+        if not member_lines:
+            # No member metadata found — still convert to bold for visual separation
+            p_close = section_html.find("</p>", match.end())
+            if p_close == -1:
+                continue
+            p_close += len("</p>")
+            modified_paragraph = section_html[: match.start()] + section_html[
+                match.start() : p_close
+            ].replace(full_link, bold_title, 1)
+            section_html = modified_paragraph + section_html[p_close:]
+            continue
+
+        cluster_list_html = "\n".join(member_lines)
+
+        # Find the enclosing </p> after this story link and insert cluster list after it
+        # Match offsets are relative to section_html
+        p_close = section_html.find("</p>", match.end())
+        if p_close == -1:
+            continue
+        p_close += len("</p>")
+
+        # Replace the <a> with <strong> inside the paragraph, then insert cluster list
+        modified_paragraph = section_html[: match.start()] + section_html[match.start() : p_close].replace(
+            full_link, bold_title, 1
+        )
+        section_html = modified_paragraph + "\n" + cluster_list_html + section_html[p_close:]
+
+    # Reconstruct the full HTML
+    modified_html = summary_html[:section_content_start] + section_html + summary_html[section_end:]
+
+    return modified_html, extra_story_dicts
 
 
 def _get_content_excerpt(story, max_chars=300):
